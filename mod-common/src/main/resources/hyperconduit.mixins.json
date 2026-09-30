@@ -1,0 +1,15 @@
+{
+  "required": true,
+  "package": "io.hyperconduit.mod.mixin",
+  "compatibilityLevel": "JAVA_21",
+  "minVersion": "0.8",
+  "mixins": [
+    "server.ServerConnectionListenerMixin"
+  ],
+  "client": [
+    "client.ConnectionClientMixin"
+  ],
+  "injectors": {
+    "defaultRequire": 1
+  }
+}

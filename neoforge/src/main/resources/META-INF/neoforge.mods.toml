@@ -1,0 +1,14 @@
+modLoader="javafml"
+loaderVersion="[4,)"
+license="MIT"
+
+[[mods]]
+    modId="hyperconduit"
+    version="0.1.0"
+    displayName="HyperConduit"
+    description="Userspace reliable-UDP tunnel with Brutal congestion control for Minecraft connections"
+
+# Registers the mixin configuration. Without this block neither mixin would ever be applied,
+# regardless of what the mixin JSON contains.
+[[mixins]]
+    config="hyperconduit.mixins.json"
