@@ -45,14 +45,16 @@ final class RollingMetricsTracker {
 
     RollingMetrics snapshot(long nowNanos) {
         expire(nowNanos);
-        long tx = 0, rx = 0, acknowledged = 0, lost = 0, retransmitted = 0;
+        long acknowledged = 0, lost = 0;
         for (Bucket bucket : buckets) {
-            tx += bucket.txBytes;
-            rx += bucket.rxBytes;
             acknowledged += bucket.acknowledgedPackets;
             lost += bucket.lostPackets;
-            retransmitted += bucket.retransmittedPackets;
         }
+        long currentSecond = nowNanos / SECOND_NANOS;
+        Bucket current = buckets[(int) Math.floorMod(currentSecond, BUCKET_COUNT)];
+        long tx = current.second == currentSecond ? current.txBytes : 0;
+        long rx = current.second == currentSecond ? current.rxBytes : 0;
+        long retransmitted = current.second == currentSecond ? current.retransmittedPackets : 0;
         long[] samples = rttSamples.stream().mapToLong(RttSample::rttNanos).toArray();
         long p95 = 0;
         if (samples.length > 0) {
@@ -60,8 +62,7 @@ final class RollingMetricsTracker {
             p95 = samples[(int) Math.ceil(samples.length * 0.95) - 1];
         }
         double lossRate = lost == 0 ? 0 : (double) lost / (lost + acknowledged);
-        return new RollingMetrics(tx / BUCKET_COUNT, rx / BUCKET_COUNT, lossRate,
-                (double) retransmitted / BUCKET_COUNT, p95,
+        return new RollingMetrics(tx, rx, lossRate, retransmitted, p95,
                 jitterCount == 0 ? 0 : jitterSum / jitterCount);
     }
 

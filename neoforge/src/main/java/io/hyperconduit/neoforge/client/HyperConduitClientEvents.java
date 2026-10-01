@@ -63,11 +63,11 @@ public final class HyperConduitClientEvents {
         SessionStats stats = channel.engine().stats();
         RollingMetrics recent = stats.recent();
         event.getLeft().add("[HyperConduit] 已连接 | RTT " + millis(stats.smoothedRttNanos())
-                + "ms p95 " + millis(recent.p95RttNanos()) + "ms | loss " + percent(recent.lossRate())
-                + " | retrans " + recent.retransmitsPerSecond() + "/s");
+                + "ms p95(10s) " + millis(recent.p95RttNanos()) + "ms | loss(10s) " + percent(recent.lossRate())
+                + " | 实时重传 " + recent.retransmitsPerSecond() + "/s");
         event.getLeft().add("[HyperConduit] " + (config != null && config.brutal ? "Brutal " : "Paced ")
-                + (config == null ? "?" : config.mbps) + " Mbps | ↓ " + rate(recent.rxBytesPerSecond())
-                + " ↑ " + rate(recent.txBytesPerSecond()) + " | jitter " + millis(recent.jitterNanos()) + "ms");
+                + (config == null ? "?" : config.mbps) + " Mbps | 实时 ↓ " + rate(recent.rxBytesPerSecond())
+                + " ↑ " + rate(recent.txBytesPerSecond()) + " | jitter(10s) " + millis(recent.jitterNanos()) + "ms");
     }
 
     @SubscribeEvent
@@ -107,8 +107,8 @@ public final class HyperConduitClientEvents {
         SessionStats stats = channel.engine().stats();
         RollingMetrics recent = stats.recent();
         return "[HyperConduit] 已连接 | RTT=" + millis(stats.smoothedRttNanos()) + "ms"
-                + " p95=" + millis(recent.p95RttNanos()) + "ms | loss=" + percent(recent.lossRate())
-                + " | retrans=" + recent.retransmitsPerSecond() + "/s | ↓="
+                + " p95(10s)=" + millis(recent.p95RttNanos()) + "ms | loss(10s)=" + percent(recent.lossRate())
+                + " | 实时重传=" + recent.retransmitsPerSecond() + "/s | 实时 ↓="
                 + rate(recent.rxBytesPerSecond()) + " ↑=" + rate(recent.txBytesPerSecond())
                 + " | total recv=" + bytes(stats.bytesReceived()) + " send=" + bytes(stats.bytesSent());
     }

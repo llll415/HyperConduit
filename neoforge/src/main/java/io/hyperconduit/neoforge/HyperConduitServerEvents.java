@@ -75,13 +75,13 @@ public final class HyperConduitServerEvents {
             rxRate += recent.rxBytesPerSecond();
             retransRate += recent.retransmitsPerSecond();
             lines.add("[HyperConduit] " + player.getGameProfile().getName()
-                    + " | RTT " + ms(stats.smoothedRttNanos()) + "ms p95 " + ms(recent.p95RttNanos())
-                    + "ms | loss " + percent(recent.lossRate()) + " | retrans " + recent.retransmitsPerSecond()
-                    + "/s | ↓ " + rate(recent.txBytesPerSecond()) + " ↑ " + rate(recent.rxBytesPerSecond()));
+                    + " | RTT " + ms(stats.smoothedRttNanos()) + "ms p95(10s) " + ms(recent.p95RttNanos())
+                    + "ms | loss(10s) " + percent(recent.lossRate()) + " | 实时重传 " + recent.retransmitsPerSecond()
+                    + "/s | 实时 ↓ " + rate(recent.txBytesPerSecond()) + " ↑ " + rate(recent.rxBytesPerSecond()));
         }
         lines.add("[HyperConduit] 总计 | 隧道 " + tunnels + " | 原版TCP " + vanilla + " | 本地 " + local
-                + " | ↓ " + rate(txRate) + " ↑ " + rate(rxRate)
-                + " | retrans " + String.format(Locale.ROOT, "%.1f/s", retransRate));
+                + " | 实时 ↓ " + rate(txRate) + " ↑ " + rate(rxRate)
+                + " | 实时重传 " + String.format(Locale.ROOT, "%.1f/s", retransRate));
         return lines;
     }
 
