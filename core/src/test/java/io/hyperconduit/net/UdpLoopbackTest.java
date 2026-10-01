@@ -7,7 +7,6 @@ import org.junit.jupiter.api.Test;
 
 import java.net.InetSocketAddress;
 import java.net.SocketAddress;
-import java.nio.charset.StandardCharsets;
 import java.security.SecureRandom;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -26,7 +25,6 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  */
 class UdpLoopbackTest {
 
-    private static final byte[] PSK = "loopback-test-psk".getBytes(StandardCharsets.UTF_8);
     private static final long BPS = 100_000_000L / 8;
     private static final int CHUNK = 64 * 1024;
 
@@ -66,9 +64,9 @@ class UdpLoopbackTest {
         };
     }
 
-    private InetSocketAddress startEchoServer(byte[] psk, CountDownLatch established,
+    private InetSocketAddress startEchoServer(CountDownLatch established,
                                               Map<Integer, SessionEngine> sessions) throws Exception {
-        SessionConfig config = SessionConfig.server(psk)
+        SessionConfig config = SessionConfig.server()
                 .congestionController(SessionConfig.brutal(BPS));
         server = new UdpServerEndpoint(new InetSocketAddress("127.0.0.1", 0), config,
                 echoHandler(established, sessions));
@@ -76,16 +74,16 @@ class UdpLoopbackTest {
         return (InetSocketAddress) server.localAddress();
     }
 
-    private UdpClientSession startClient(InetSocketAddress target, byte[] psk, int sendBuffer)
+    private UdpClientSession startClient(InetSocketAddress target, int sendBuffer)
             throws Exception {
-        client = newClient(target, psk, sendBuffer);
+        client = newClient(target, sendBuffer);
         return client;
     }
 
     /** Creates a client the caller owns, for tests that need more than one at a time. */
-    private static UdpClientSession newClient(InetSocketAddress target, byte[] psk, int sendBuffer)
+    private static UdpClientSession newClient(InetSocketAddress target, int sendBuffer)
             throws Exception {
-        SessionConfig config = SessionConfig.client(psk)
+        SessionConfig config = SessionConfig.client()
                 .connectionId(new SecureRandom().nextInt())
                 .congestionController(SessionConfig.brutal(BPS))
                 .sendBufferBytes(sendBuffer);
@@ -98,10 +96,10 @@ class UdpLoopbackTest {
     void echoRoundTripOverRealUdp() throws Exception {
         CountDownLatch established = new CountDownLatch(1);
         Map<Integer, SessionEngine> sessions = new ConcurrentHashMap<>();
-        InetSocketAddress bind = startEchoServer(PSK, established, sessions);
+        InetSocketAddress bind = startEchoServer(established, sessions);
 
         int size = 512 * 1024;
-        UdpClientSession session = startClient(bind, PSK, size + CHUNK);
+        UdpClientSession session = startClient(bind, size + CHUNK);
         assertTrue(session.awaitEstablished(TimeUnit.SECONDS.toNanos(15)),
                 "handshake must complete over loopback, state=" + session.engine().state());
         assertTrue(established.await(5, TimeUnit.SECONDS), "the server must report the session");
@@ -127,17 +125,19 @@ class UdpLoopbackTest {
     }
 
     @Test
-    void wrongPskNeverEstablishes() throws Exception {
+    void rejectedServerIdentityNeverEstablishes() throws Exception {
         CountDownLatch established = new CountDownLatch(1);
         Map<Integer, SessionEngine> sessions = new ConcurrentHashMap<>();
-        InetSocketAddress bind = startEchoServer(PSK, established, sessions);
+        InetSocketAddress bind = startEchoServer(established, sessions);
 
-        UdpClientSession session = startClient(bind, "not-the-psk".getBytes(StandardCharsets.UTF_8),
-                CHUNK);
-        assertFalse(session.awaitEstablished(TimeUnit.SECONDS.toNanos(3)),
-                "a client without the PSK must not establish");
-        assertEquals(0, server.sessionCount(),
-                "and must not even get a session allocated on the server");
+        SessionConfig config = SessionConfig.client()
+                .connectionId(new SecureRandom().nextInt())
+                .peerIdentityVerifier(publicKey -> false)
+                .congestionController(SessionConfig.brutal(BPS))
+                .sendBufferBytes(CHUNK);
+        client = new UdpClientSession(bind, config, null);
+        client.start();
+        assertFalse(client.awaitEstablished(TimeUnit.SECONDS.toNanos(3)));
         assertFalse(established.await(1, TimeUnit.SECONDS));
     }
 
@@ -145,7 +145,7 @@ class UdpLoopbackTest {
     void twoClientsShareOneServerSocket() throws Exception {
         CountDownLatch established = new CountDownLatch(2);
         Map<Integer, SessionEngine> sessions = new ConcurrentHashMap<>();
-        InetSocketAddress bind = startEchoServer(PSK, established, sessions);
+        InetSocketAddress bind = startEchoServer(established, sessions);
 
         int size = 64 * 1024;
         byte[] first = new byte[size];
@@ -153,8 +153,8 @@ class UdpLoopbackTest {
         new SecureRandom().nextBytes(first);
         new SecureRandom().nextBytes(second);
 
-        UdpClientSession a = newClient(bind, PSK, size + CHUNK);
-        UdpClientSession b = newClient(bind, PSK, size + CHUNK);
+        UdpClientSession a = newClient(bind, size + CHUNK);
+        UdpClientSession b = newClient(bind, size + CHUNK);
         try {
             assertTrue(a.awaitEstablished(TimeUnit.SECONDS.toNanos(15)));
             assertTrue(b.awaitEstablished(TimeUnit.SECONDS.toNanos(15)));
@@ -176,9 +176,9 @@ class UdpLoopbackTest {
     void closedSessionsAreEvictedFromTheRoutingTable() throws Exception {
         CountDownLatch established = new CountDownLatch(1);
         Map<Integer, SessionEngine> sessions = new ConcurrentHashMap<>();
-        InetSocketAddress bind = startEchoServer(PSK, established, sessions);
+        InetSocketAddress bind = startEchoServer(established, sessions);
 
-        UdpClientSession session = startClient(bind, PSK, CHUNK);
+        UdpClientSession session = startClient(bind, CHUNK);
         assertTrue(session.awaitEstablished(TimeUnit.SECONDS.toNanos(15)));
         assertEquals(1, server.sessionCount());
 

@@ -22,10 +22,9 @@ import org.spongepowered.asm.mixin.injection.Redirect;
  * unset, and swapping it in one call keeps Minecraft's own handler and pipeline attached to the
  * Bootstrap untouched.
  *
- * <p>The channel itself resolves the actual tunnel target at connect time: the configured
- * {@code tunnelServer} when one is set (passed as an explicit peer), or the address from the
- * player's server list when it is blank. Loopback targets are refused there, not here, because
- * the address is not available at this injection point.
+ * <p>The channel resolves its tunnel target at connect time from Minecraft's server-list address.
+ * The same host and port are used for the UDP tunnel, and the client's trust record is bound to
+ * that endpoint. Loopback targets are refused there because the address is unavailable here.
  *
  * <p>When the mod is disabled the original channel class passes through untouched, which is what
  * makes "disabled" mean plain vanilla TCP.
@@ -49,15 +48,10 @@ public abstract class ConnectionClientMixin {
             return bootstrap.channel(originalChannelClass);
         }
 
-        // A null peer means the channel resolves the target at connect time: the configured
-        // tunnelServer if one is set, otherwise whatever address Minecraft is connecting to.
-        java.net.InetSocketAddress explicitPeer = null;
-        if (config.hasExplicitTunnelServer()) {
-            HyperConduitConfig.TunnelAddress configured = config.parseTunnelServerAddress();
-            explicitPeer = new java.net.InetSocketAddress(configured.host(), configured.port());
-        }
-        final java.net.InetSocketAddress peer = explicitPeer;
+        // The tunnel always uses exactly the address in Minecraft's server list. The channel calls
+        // this factory only after Netty supplies that resolved target, binding TOFU to host:port.
         return bootstrap.channelFactory(() -> new HyperConduitChannel(
-                new HyperConduitChannel.ChannelOptions(peer, config.clientSessionConfig())));
+                new HyperConduitChannel.ChannelOptions(null, target -> config.clientSessionConfig(
+                        ConfigHolder.verifierFor(target.getHostString(), target.getPort())))));
     }
 }

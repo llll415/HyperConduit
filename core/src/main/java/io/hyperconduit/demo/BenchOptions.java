@@ -4,13 +4,11 @@ import io.hyperconduit.cc.CongestionController;
 import io.hyperconduit.conn.SessionConfig;
 
 import java.net.InetSocketAddress;
-import java.nio.charset.StandardCharsets;
 import java.util.function.Supplier;
 
 /** Parsed command-line options, shared by the server and client entry points. */
 public record BenchOptions(
         InetSocketAddress address,
-        byte[] psk,
         String mode,
         String controller,
         int mbps,
@@ -35,7 +33,7 @@ public record BenchOptions(
     }
 
     public SessionConfig clientConfig(int connectionId) {
-        return SessionConfig.client(psk)
+        return SessionConfig.client()
                 .connectionId(connectionId)
                 .congestionController(congestionController())
                 .receiveWindowBytes(windowBytes)
@@ -43,7 +41,7 @@ public record BenchOptions(
     }
 
     public SessionConfig serverConfig() {
-        return SessionConfig.server(psk)
+        return SessionConfig.server()
                 .congestionController(congestionController())
                 .receiveWindowBytes(windowBytes);
     }
@@ -58,10 +56,4 @@ public record BenchOptions(
         return Math.max(1024 * 1024, 4 * windowBytes);
     }
 
-    public static byte[] pskBytes(String psk) {
-        if (psk == null || psk.isBlank()) {
-            throw new IllegalArgumentException("--psk=<secret> is required");
-        }
-        return psk.getBytes(StandardCharsets.UTF_8);
-    }
 }

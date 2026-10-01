@@ -21,17 +21,11 @@ public final class HyperConduitNeoForge {
     public HyperConduitNeoForge() {
         Path configDir = FMLPaths.CONFIGDIR.get();
         HyperConduitConfig config = HyperConduitConfig.load(configDir);
-        ConfigHolder.install(config);
+        ConfigHolder.install(config, configDir);
         System.out.println("[HyperConduit] config: " + config);
         if (!config.enabled) {
             System.out.println("[HyperConduit] the tunnel is DISABLED, so connections behave exactly "
-                    + "as vanilla. To use it, set \"enabled\": true in "
-                    + configDir.resolve("hyperconduit.json")
-                    + " and set the same \"psk\" on both ends.");
-        } else if ("change-me".equals(config.psk)) {
-            System.out.println("[HyperConduit] WARNING: the tunnel is enabled but \"psk\" is still "
-                    + "the placeholder value. Connections will fail until it is set to a shared "
-                    + "secret on both ends.");
+                    + "as vanilla. Enable it from the multiplayer or LAN HyperConduit settings screen.");
         }
     }
 }

@@ -3,10 +3,8 @@ package io.hyperconduit.crypto;
 import io.hyperconduit.util.InBuffer;
 import io.hyperconduit.util.OutBuffer;
 
-import java.nio.charset.StandardCharsets;
 import java.security.KeyPair;
 import java.security.PrivateKey;
-import java.security.SecureRandom;
 import java.util.Arrays;
 
 /**
@@ -34,9 +32,7 @@ public final class NoiseXx {
     public static final int EPHEMERAL_LEN = X25519.KEY_LEN;
     /** A transmitted static key is 32 bytes of key plus the 16-byte AEAD tag. */
     public static final int ENCRYPTED_STATIC_LEN = X25519.KEY_LEN + AeadCipher.TAG_LEN;
-    public static final int PSK_LEN = 32;
 
-    private static final byte[] PROLOGUE_LABEL = "HyperConduit/v1".getBytes(StandardCharsets.UTF_8);
     private static final byte[] EMPTY = new byte[0];
 
     public enum Role {
@@ -65,27 +61,30 @@ public final class NoiseXx {
     private int messageIndex;
     private TransportKeys keys;
 
-    private NoiseXx(Role role, KeyPair staticKey, byte[] psk) {
+    private NoiseXx(Role role, KeyPair staticKey) {
         this.role = role;
         this.staticPrivate = staticKey.getPrivate();
         this.staticPublic = X25519.encodePublic(staticKey.getPublic());
         this.sym = new SymmetricState(PROTOCOL_NAME);
-        this.sym.mixHash(prologue(psk));
         this.ephemeral = X25519.generate();
     }
 
-    public static NoiseXx initiator(KeyPair staticKey, byte[] psk) {
-        return new NoiseXx(Role.INITIATOR, staticKey, psk);
+    public static NoiseXx initiator(KeyPair staticKey) {
+        return new NoiseXx(Role.INITIATOR, staticKey);
     }
 
-    public static NoiseXx responder(KeyPair staticKey, byte[] psk) {
-        return new NoiseXx(Role.RESPONDER, staticKey, psk);
+    public static NoiseXx responder(KeyPair staticKey) {
+        return new NoiseXx(Role.RESPONDER, staticKey);
     }
 
-    public static byte[] randomPsk() {
-        byte[] psk = new byte[PSK_LEN];
-        new SecureRandom().nextBytes(psk);
-        return psk;
+    /** Temporary source compatibility for v1 callers; the PSK is intentionally ignored in v2. */
+    @Deprecated public static NoiseXx initiator(KeyPair staticKey, byte[] ignoredPsk) {
+        return initiator(staticKey);
+    }
+
+    /** Temporary source compatibility for v1 callers; the PSK is intentionally ignored in v2. */
+    @Deprecated public static NoiseXx responder(KeyPair staticKey, byte[] ignoredPsk) {
+        return responder(staticKey);
     }
 
     public Role role() {
@@ -100,11 +99,7 @@ public final class NoiseXx {
         return remoteStatic == null ? null : remoteStatic.clone();
     }
 
-    /**
-     * This side's ephemeral public key. The initiator needs it before writing message 1, because
-     * the PSK authenticator that guards the responder's DH work is computed over exactly these
-     * bytes.
-     */
+    /** This side's ephemeral public key. */
     public byte[] ephemeralPublicKey() {
         return X25519.encodePublic(ephemeral.getPublic());
     }
@@ -188,7 +183,7 @@ public final class NoiseXx {
                 throw new HandshakeException("handshake message has " + in.remaining() + " trailing bytes");
             }
         } catch (AeadCipher.AuthenticationException e) {
-            throw new HandshakeException("handshake authentication failed (mismatched PSK, keys, or tampering)", e);
+            throw new HandshakeException("handshake authentication failed (keys or tampering)", e);
         } catch (InBuffer.BufferUnderflow e) {
             throw new HandshakeException("truncated handshake message", e);
         } catch (SecurityException e) {
@@ -275,13 +270,4 @@ public final class NoiseXx {
         Arrays.fill(remoteEphemeral, (byte) 0);
     }
 
-    private static byte[] prologue(byte[] psk) {
-        OutBuffer out = new OutBuffer(PROLOGUE_LABEL.length + 1 + (psk == null ? 0 : psk.length));
-        out.writeBytes(PROLOGUE_LABEL);
-        out.writeByte(0);
-        if (psk != null && psk.length > 0) {
-            out.writeBytes(psk);
-        }
-        return out.toByteArray();
-    }
 }

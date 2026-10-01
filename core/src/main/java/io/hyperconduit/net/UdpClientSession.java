@@ -66,7 +66,7 @@ public final class UdpClientSession implements AutoCloseable {
         this.channel.register(selector, SelectionKey.OP_READ);
         this.engine = SessionEngine.client(config, clock, new SessionListener() {
             @Override
-            public void onEstablished() {
+            public void onPeerConfirmed() {
                 established.countDown();
                 UdpClientSession.this.listener.onEstablished();
             }

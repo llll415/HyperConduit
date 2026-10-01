@@ -1,5 +1,7 @@
 package io.hyperconduit.netty;
 
+import io.hyperconduit.conn.HandshakePacket;
+import io.hyperconduit.conn.RetryCookie;
 import io.hyperconduit.conn.SessionConfig;
 import io.hyperconduit.conn.SessionEngine;
 import io.hyperconduit.conn.SessionListener;
@@ -23,6 +25,8 @@ import java.nio.channels.Selector;
 import java.util.HashMap;
 import java.util.Iterator;
 import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * A Netty {@link AbstractServerChannel} that "listens" on a HyperConduit UDP tunnel instead of a
@@ -53,6 +57,7 @@ public final class HyperConduitServerChannel extends AbstractServerChannel {
 
     private static final int READ_BUFFER_SIZE = 64 * 1024;
     private static final int SOCKET_BUFFER_BYTES = 4 * 1024 * 1024;
+    private static final Set<HyperConduitServerChannel> ACTIVE_LISTENERS = ConcurrentHashMap.newKeySet();
 
     private final ServerOptions options;
     private final ChannelConfig config = new DefaultChannelConfig(this);
@@ -61,11 +66,14 @@ public final class HyperConduitServerChannel extends AbstractServerChannel {
     private volatile Selector selector;
     private volatile boolean open;
     private volatile boolean running;
+    private volatile boolean accepting = true;
+    private volatile long gracefulShutdownDeadlineNanos = Long.MAX_VALUE;
     private volatile Thread driverThread;
     private volatile SocketAddress localAddress;
 
     /** Active tunnel sessions, keyed by connection id. */
     private final Map<Integer, Session> sessions = new HashMap<>();
+    private final RetryCookie retryCookie = new RetryCookie();
 
     public HyperConduitServerChannel(ServerOptions options) {
         super();
@@ -118,6 +126,7 @@ public final class HyperConduitServerChannel extends AbstractServerChannel {
             selector = newSelector;
             this.localAddress = channel.getLocalAddress();
             running = true;
+            ACTIVE_LISTENERS.add(this);
             driverThread = new Thread(this::runDriver, "hyperconduit-server-driver");
             driverThread.setDaemon(true);
             driverThread.start();
@@ -137,31 +146,41 @@ public final class HyperConduitServerChannel extends AbstractServerChannel {
 
     @Override
     protected void doClose() throws Exception {
-        open = false;
-        running = false;
+        beginGracefulShutdown();
+        if (driverThread != null && driverThread != Thread.currentThread()) {
+            driverThread.join(2200);
+        }
+        forceCloseResources();
+    }
+
+    /** Requests a bounded CLOSE-frame drain from every active HyperConduit listener. */
+    public static void beginGracefulShutdownAll() {
+        for (HyperConduitServerChannel listener : ACTIVE_LISTENERS) {
+            listener.beginGracefulShutdown();
+        }
+    }
+
+    /** Requests a bounded CLOSE-frame drain from the UDP driver before resources are released. */
+    public void beginGracefulShutdown() {
+        accepting = false;
+        gracefulShutdownDeadlineNanos = options.clock().nanoTime() + 1_500_000_000L;
         if (selector != null) {
             selector.wakeup();
         }
-        if (driverThread != null) {
-            driverThread.join(2000);
-        }
-        for (Session session : sessions.values()) {
-            session.engine.close(SessionEngine.CLOSE_REASON_LOCAL, "server shutting down");
-        }
+    }
+
+    private void forceCloseResources() {
+        open = false;
+        running = false;
+        ACTIVE_LISTENERS.remove(this);
         sessions.clear();
         try {
-            if (selector != null) {
-                selector.close();
-            }
+            if (selector != null) selector.close();
         } catch (IOException ignored) {
-            // nothing useful to do while tearing down
         }
         try {
-            if (datagramChannel != null) {
-                datagramChannel.close();
-            }
+            if (datagramChannel != null) datagramChannel.close();
         } catch (IOException ignored) {
-            // nothing useful to do while tearing down
         }
     }
 
@@ -190,9 +209,19 @@ public final class HyperConduitServerChannel extends AbstractServerChannel {
                 DriverWait.await(selector, waitNanos);
                 selector.selectedKeys().clear();
                 receiveDatagrams(readBuffer);
+                if (!accepting) {
+                    for (Session session : sessions.values()) {
+                        session.engine.close(SessionEngine.CLOSE_REASON_SERVER_SHUTDOWN,
+                                "[HyperConduit] Server is shutting down");
+                    }
+                }
                 transmitAll();
                 evictClosed();
+                if (!accepting && (sessions.isEmpty() || options.clock().nanoTime() >= gracefulShutdownDeadlineNanos)) {
+                    running = false;
+                }
             }
+            forceCloseResources();
         } catch (Throwable t) {
             pipeline().fireExceptionCaught(t);
         }
@@ -221,39 +250,55 @@ public final class HyperConduitServerChannel extends AbstractServerChannel {
     }
 
     private void dispatch(byte[] datagram, SocketAddress from) {
+        if (HandshakePacket.isHandshake(datagram, 0, datagram.length)) {
+            acceptHandshake(datagram, from);
+            return;
+        }
         if (datagram.length < io.hyperconduit.frame.PacketCodec.HEADER_LEN) {
             return;
         }
-        int connectionId = io.hyperconduit.frame.PacketCodec.peekConnectionId(datagram, 0, datagram.length);
-        Session existing = sessions.get(connectionId);
+        Session existing = sessions.get(io.hyperconduit.frame.PacketCodec.peekConnectionId(datagram, 0, datagram.length));
+        if (existing != null) {
+            existing.engine.onDatagramReceived(datagram, 0, datagram.length);
+        }
+    }
+
+    private void acceptHandshake(byte[] datagram, SocketAddress from) {
+        HandshakePacket.Decoded packet;
+        try {
+            packet = HandshakePacket.decode(datagram, 0, datagram.length);
+        } catch (io.hyperconduit.ProtocolException e) {
+            return;
+        }
+        Session existing = sessions.get(packet.connectionId());
         if (existing != null) {
             existing.engine.onDatagramReceived(datagram, 0, datagram.length);
             return;
         }
-        acceptNewSession(datagram, connectionId, from);
-    }
-
-    private void acceptNewSession(byte[] datagram, int connectionId, SocketAddress from) {
-        io.hyperconduit.frame.PacketCodec.Decoded decoded;
-        try {
-            decoded = io.hyperconduit.frame.PacketCodec.forHandshake(
-                    io.hyperconduit.conn.HandshakePayload.maskKey(options.sessionConfig().psk()))
-                    .decode(datagram, 0, datagram.length);
-        } catch (io.hyperconduit.ProtocolException e) {
-            return; // not ours, or not decodable with the PSK-derived mask key: drop silently
-        }
-        if (decoded.flags() != io.hyperconduit.frame.PacketCodec.FLAG_HANDSHAKE) {
-            return; // data for a session that does not exist
-        }
-        // One HMAC before any session state is allocated.
-        if (!io.hyperconduit.conn.SessionEngine.verifyInitiator(
-                options.sessionConfig().psk(), decoded.plaintext())) {
+        if (!accepting || packet.type() != HandshakePacket.TYPE_INITIAL) {
             return;
         }
+        long now = System.currentTimeMillis();
+        if (!retryCookie.verify(from, packet.connectionId(), packet.cookie(), now)) {
+            sendHandshake(HandshakePacket.retry(packet.connectionId(),
+                    retryCookie.mint(from, packet.connectionId(), now + 15_000L)), from);
+            return;
+        }
+        try {
+            Session session = new Session(packet.connectionId(), from);
+            session.engine.acceptInitiatorMessage1(packet.payload());
+            sessions.put(packet.connectionId(), session);
+        } catch (io.hyperconduit.ProtocolException | io.hyperconduit.crypto.NoiseXx.HandshakeException ignored) {
+            // Invalid Noise message 1 does not retain state.
+        }
+    }
 
-        Session session = new Session(connectionId, from);
-        sessions.put(connectionId, session);
-        session.engine.onDatagramReceived(datagram, 0, datagram.length);
+    private void sendHandshake(byte[] datagram, SocketAddress peer) {
+        try {
+            datagramChannel.send(ByteBuffer.wrap(datagram), peer);
+        } catch (IOException ignored) {
+            // Retry is best effort; the client will retransmit its Initial.
+        }
     }
 
     private void transmitAll() throws IOException {

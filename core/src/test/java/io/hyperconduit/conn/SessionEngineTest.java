@@ -1,11 +1,12 @@
 package io.hyperconduit.conn;
 
-import io.hyperconduit.frame.PacketCodec;
+import io.hyperconduit.crypto.X25519;
 import io.hyperconduit.sim.ManualClock;
 import io.hyperconduit.sim.SimulatedLink;
 import org.junit.jupiter.api.Test;
 
 import java.nio.charset.StandardCharsets;
+import java.security.KeyPair;
 import java.util.Arrays;
 import java.util.Random;
 import java.util.concurrent.atomic.AtomicReference;
@@ -29,19 +30,18 @@ class SessionEngineTest {
 
     private static final long MS = 1_000_000L;
     private static final long SECOND = 1_000_000_000L;
-    private static final byte[] PSK = "session-engine-test-psk".getBytes(StandardCharsets.UTF_8);
     private static final int CONNECTION_ID = 0x0BADF00D;
     /** 100 Mbit/s, a plausible residential uplink. */
     private static final long BPS = 100_000_000L / 8;
 
     private static SessionConfig clientConfig() {
-        return SessionConfig.client(PSK)
+        return SessionConfig.client()
                 .connectionId(CONNECTION_ID)
                 .congestionController(SessionConfig.brutal(BPS));
     }
 
     private static SessionConfig serverConfig() {
-        return SessionConfig.server(PSK)
+        return SessionConfig.server()
                 .congestionController(SessionConfig.brutal(BPS));
     }
 
@@ -80,41 +80,34 @@ class SessionEngineTest {
     }
 
     @Test
-    void handshakeFailsWhenThePskDoesNotMatch() {
-        SessionConfig wrongPskClient = SessionConfig.client("not-the-psk".getBytes(StandardCharsets.UTF_8))
+    void untrustedServerIdentityFailsBeforeMessage3() {
+        KeyPair serverIdentity = X25519.generate();
+        SessionConfig client = SessionConfig.client()
                 .connectionId(CONNECTION_ID)
+                .peerIdentityVerifier(publicKey -> false)
                 .congestionController(SessionConfig.brutal(BPS));
-        SimulatedLink link = new SimulatedLink(wrongPskClient, serverConfig());
+        SessionConfig server = SessionConfig.server()
+                .staticKey(serverIdentity)
+                .congestionController(SessionConfig.brutal(BPS));
+        SimulatedLink link = new SimulatedLink(client, server);
 
-        // The PSK derives the header mask key, so the server cannot even parse message 1 and drops
-        // it silently. That is the desired behaviour: no oracle, no work performed. The client
-        // therefore fails by timeout rather than by an explicit rejection.
-        link.run(20 * SECOND);
+        link.run(5 * SECOND);
         assertFalse(link.bothEstablished());
         assertEquals(SessionEngine.State.CLOSED, link.client.state());
-        assertNotNull(link.clientError, "the client must report why it gave up");
-        assertNotEquals(SessionEngine.State.ESTABLISHED, link.server.state(),
-                "the server must never establish a session with the wrong PSK");
+        assertNotNull(link.clientError);
     }
 
     @Test
-    void verifyInitiatorAcceptsOnlyTheCorrectPsk() throws Exception {
+    void v2InitialCarriesNoSharedSecret() throws Exception {
         ManualClock clock = new ManualClock(1_000L * SECOND);
         SessionEngine client = SessionEngine.client(clientConfig(), clock, null);
         byte[] datagram = client.nextDatagram();
         assertNotNull(datagram);
-
-        PacketCodec.Decoded decoded = PacketCodec
-                .forHandshake(HandshakePayload.maskKey(PSK))
-                .decode(datagram, 0, datagram.length);
-        assertEquals(PacketCodec.FLAG_HANDSHAKE, decoded.flags());
-        byte[] message1 = decoded.plaintext();
-
-        assertTrue(SessionEngine.verifyInitiator(PSK, message1),
-                "the correct PSK must validate the authenticator");
-        assertFalse(SessionEngine.verifyInitiator("wrong".getBytes(StandardCharsets.UTF_8), message1));
-        assertFalse(SessionEngine.verifyInitiator(PSK, Arrays.copyOf(message1, 40)),
-                "a truncated message must be rejected, not throw");
+        HandshakePacket.Decoded initial = HandshakePacket.decode(datagram, 0, datagram.length);
+        assertEquals(HandshakePacket.TYPE_INITIAL, initial.type());
+        assertEquals(CONNECTION_ID, initial.connectionId());
+        assertEquals(0, initial.cookie().length);
+        assertTrue(initial.payload().length >= X25519.KEY_LEN);
     }
 
     @Test
@@ -217,11 +210,11 @@ class SessionEngineTest {
     @Test
     void senderStallsWhenTheReceiverDoesNotDrain() {
         int window = 8 * 1024;
-        SessionConfig sendingClient = SessionConfig.client(PSK)
+        SessionConfig sendingClient = SessionConfig.client()
                 .connectionId(CONNECTION_ID)
                 .congestionController(SessionConfig.brutal(BPS))
                 .sendBufferBytes(16 * 1024);
-        SessionConfig receivingServer = SessionConfig.server(PSK)
+        SessionConfig receivingServer = SessionConfig.server()
                 .congestionController(SessionConfig.brutal(BPS))
                 .receiveWindowBytes(window);
         SimulatedLink link = new SimulatedLink(sendingClient, receivingServer).autoDrain(false);
@@ -241,7 +234,7 @@ class SessionEngineTest {
     void senderResumesOnceTheReceiverDrains() {
         int size = 100 * 1024;
         int window = 8 * 1024;
-        SessionConfig receivingServer = SessionConfig.server(PSK)
+        SessionConfig receivingServer = SessionConfig.server()
                 .congestionController(SessionConfig.brutal(BPS))
                 .receiveWindowBytes(window);
         SimulatedLink link = new SimulatedLink(clientConfig(), receivingServer).autoDrain(false);
@@ -265,7 +258,7 @@ class SessionEngineTest {
     void transferLargerThanTheWindowCompletes() {
         int window = 16 * 1024;
         int size = 200 * 1024;
-        SessionConfig receivingServer = SessionConfig.server(PSK)
+        SessionConfig receivingServer = SessionConfig.server()
                 .congestionController(SessionConfig.brutal(BPS))
                 .receiveWindowBytes(window);
         SimulatedLink link = new SimulatedLink(clientConfig(), receivingServer);
@@ -386,6 +379,7 @@ class SessionEngineTest {
         assertEquals(size, server.bytesDelivered());
         assertTrue(client.smoothedRttNanos() > 0, "an RTT must have been measured");
         assertEquals(0, client.queuedToSendBytes(), "everything queued must have been sent");
+        assertTrue(client.recent().txBytesPerSecond() > 0, "recent window must report sender throughput");
     }
 
     @Test

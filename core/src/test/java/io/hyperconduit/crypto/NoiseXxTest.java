@@ -80,17 +80,17 @@ class NoiseXxTest {
     }
 
     @Test
-    void mismatchedPskFailsHandshake() throws Exception {
-        NoiseXx client = NoiseXx.initiator(X25519.generate(), PSK);
-        NoiseXx server = NoiseXx.responder(X25519.generate(), "wrong-psk".getBytes(StandardCharsets.UTF_8));
-
-        // msg1 carries no ciphertext, so a wrong-PSK responder can still parse it; the divergence
-        // only becomes detectable at msg2, where the static key is AEAD-encrypted under h.
-        byte[] msg1 = client.writeMessage(new byte[0]);
-        server.readMessage(msg1);
-        byte[] msg2 = server.writeMessage(new byte[0]);
-
-        assertThrows(NoiseXx.HandshakeException.class, () -> client.readMessage(msg2));
+    void distinctServerIdentitiesProduceDistinctAuthenticatedStaticKeys() throws Exception {
+        KeyPair clientStatic = X25519.generate();
+        KeyPair firstServer = X25519.generate();
+        KeyPair secondServer = X25519.generate();
+        NoiseXx client = NoiseXx.initiator(clientStatic);
+        NoiseXx responder = NoiseXx.responder(firstServer);
+        responder.readMessage(client.writeMessage(new byte[0]));
+        client.readMessage(responder.writeMessage(new byte[0]));
+        assertFalse(Arrays.equals(X25519.encodePublic(firstServer.getPublic()),
+                X25519.encodePublic(secondServer.getPublic())));
+        assertArrayEquals(X25519.encodePublic(firstServer.getPublic()), client.remoteStaticPublicKey());
     }
 
     @Test
@@ -206,11 +206,4 @@ class NoiseXxTest {
         assertThrows(IllegalArgumentException.class, () -> Hkdf.derive(new byte[32], new byte[0], 4));
     }
 
-    @Test
-    void randomPskIsWellFormedAndUnique() {
-        byte[] a = NoiseXx.randomPsk();
-        byte[] b = NoiseXx.randomPsk();
-        assertEquals(NoiseXx.PSK_LEN, a.length);
-        assertFalse(Arrays.equals(a, b));
-    }
 }

@@ -46,7 +46,8 @@ public abstract class ServerConnectionListenerMixin {
             return bootstrap.channel(originalChannelClass);
         }
         return bootstrap.channelFactory(() -> new HyperConduitServerChannel(
-                new HyperConduitServerChannel.ServerOptions(null, config.serverSessionConfig())));
+                new HyperConduitServerChannel.ServerOptions(null,
+                        config.serverSessionConfig(ConfigHolder.serverIdentity()))));
     }
 
     @Redirect(
@@ -69,7 +70,8 @@ public abstract class ServerConnectionListenerMixin {
         ServerBootstrap tunnelBootstrap = new ServerBootstrap()
                 .group(parentGroup, childGroup)
                 .channelFactory(() -> new HyperConduitServerChannel(
-                        new HyperConduitServerChannel.ServerOptions(null, config.serverSessionConfig())))
+                        new HyperConduitServerChannel.ServerOptions(null,
+                                config.serverSessionConfig(ConfigHolder.serverIdentity()))))
                 .childHandler(bootstrapConfig.childHandler())
                 .localAddress(localAddress);
         ChannelFuture tunnelFuture = tunnelBootstrap.bind().syncUninterruptibly();

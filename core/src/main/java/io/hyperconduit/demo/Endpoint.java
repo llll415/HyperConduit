@@ -8,8 +8,8 @@ import java.util.Map;
  * Command-line entry point.
  *
  * <pre>
- *   java -jar hyperconduit-core.jar server --bind=0.0.0.0:4444 --psk=SECRET [--mbps=100] [--cc=brutal]
- *   java -jar hyperconduit-core.jar client --server=HOST:4444 --psk=SECRET --mode=down|up|rtt|rtt-load
+ *   java -jar hyperconduit-core.jar server --bind=0.0.0.0:4444 [--mbps=100] [--cc=brutal]
+ *   java -jar hyperconduit-core.jar client --server=HOST:4444 --mode=down|up|rtt|rtt-load
  * </pre>
  *
  * <p>The jar has no dependencies beyond the JDK, so deploying it is copying one file and having a
@@ -68,7 +68,6 @@ public final class Endpoint {
     private static BenchOptions serverOptions(Map<String, String> options) {
         return new BenchOptions(
                 address(options.getOrDefault("bind", "0.0.0.0:4444")),
-                BenchOptions.pskBytes(options.get("psk")),
                 "server",
                 options.getOrDefault("cc", "brutal"),
                 intOf(options, "mbps", BenchOptions.DEFAULT_MBPS),
@@ -87,7 +86,6 @@ public final class Endpoint {
         }
         return new BenchOptions(
                 address(server),
-                BenchOptions.pskBytes(options.get("psk")),
                 options.getOrDefault("mode", "down"),
                 options.getOrDefault("cc", "brutal"),
                 intOf(options, "mbps", BenchOptions.DEFAULT_MBPS),
@@ -128,10 +126,10 @@ public final class Endpoint {
                 HyperConduit -- userspace reliable UDP tunnel with Brutal congestion control
 
                 Usage:
-                  server --bind=<host:port> --psk=<secret>
+                  server --bind=<host:port>
                          [--cc=brutal|reno] [--mbps=100] [--window=262144]
 
-                  client --server=<host:port> --psk=<secret> --mode=<mode>
+                  client --server=<host:port> --mode=<mode>
                          [--cc=brutal|reno] [--mbps=100] [--window=262144]
                          [--size=33554432] [--probes=200] [--interval=50]
                          [--timeout=120] [--verify=true|false]

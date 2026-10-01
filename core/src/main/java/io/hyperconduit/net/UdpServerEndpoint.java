@@ -1,7 +1,8 @@
 package io.hyperconduit.net;
 
 import io.hyperconduit.ProtocolException;
-import io.hyperconduit.conn.HandshakePayload;
+import io.hyperconduit.conn.HandshakePacket;
+import io.hyperconduit.conn.RetryCookie;
 import io.hyperconduit.conn.SessionConfig;
 import io.hyperconduit.conn.SessionEngine;
 import io.hyperconduit.conn.SessionListener;
@@ -63,15 +64,9 @@ public final class UdpServerEndpoint implements AutoCloseable {
     private final Selector selector;
     /** Read-only after construction: every session shares it, including the server's static key. */
     private final SessionConfig template;
-    /**
-     * Cached at construction. {@link SessionConfig#psk()} clones, and this is consulted once per
-     * inbound datagram from an unauthenticated peer, so cloning per packet would hand an attacker a
-     * cheap allocation amplifier.
-     */
-    private final byte[] psk;
     private final SessionHandler handler;
     private final Clock clock;
-    private final PacketCodec handshakeCodec;
+    private final RetryCookie retryCookie = new RetryCookie();
     private final Map<Integer, Session> sessions = new HashMap<>();
     private final ByteBuffer readBuffer = ByteBuffer.allocateDirect(64 * 1024);
 
@@ -93,8 +88,6 @@ public final class UdpServerEndpoint implements AutoCloseable {
         this.handler = handler;
         this.clock = clock;
         this.maxSessions = maxSessions;
-        this.psk = template.psk();
-        this.handshakeCodec = PacketCodec.forHandshake(HandshakePayload.maskKey(psk));
         this.channel = DatagramChannel.open();
         this.channel.configureBlocking(false);
         SocketBuffers.apply(this.channel, SOCKET_BUFFER_BYTES, "server");
@@ -183,41 +176,50 @@ public final class UdpServerEndpoint implements AutoCloseable {
     }
 
     private void dispatch(byte[] datagram, SocketAddress from) {
+        if (HandshakePacket.isHandshake(datagram, 0, datagram.length)) {
+            acceptHandshake(datagram, from);
+            return;
+        }
         if (datagram.length < PacketCodec.HEADER_LEN) {
             return;
         }
-        int connectionId = PacketCodec.peekConnectionId(datagram, 0, datagram.length);
-        Session existing = sessions.get(connectionId);
+        Session existing = sessions.get(PacketCodec.peekConnectionId(datagram, 0, datagram.length));
+        if (existing != null) {
+            existing.engine.onDatagramReceived(datagram, 0, datagram.length);
+        }
+    }
+
+    private void acceptHandshake(byte[] datagram, SocketAddress from) {
+        HandshakePacket.Decoded packet;
+        try {
+            packet = HandshakePacket.decode(datagram, 0, datagram.length);
+        } catch (ProtocolException e) {
+            return;
+        }
+        Session existing = sessions.get(packet.connectionId());
         if (existing != null) {
             existing.engine.onDatagramReceived(datagram, 0, datagram.length);
             return;
         }
-        acceptNewSession(datagram, connectionId, from);
-    }
-
-    private void acceptNewSession(byte[] datagram, int connectionId, SocketAddress from) {
-        PacketCodec.Decoded decoded;
-        try {
-            decoded = handshakeCodec.decode(datagram, 0, datagram.length);
-        } catch (ProtocolException e) {
-            return; // not ours, or not decodable with the PSK-derived mask key: drop silently
+        if (packet.type() != HandshakePacket.TYPE_INITIAL) {
+            return;
         }
-        if (decoded.flags() != PacketCodec.FLAG_HANDSHAKE) {
-            return; // data for a session that does not exist
-        }
-        // One HMAC before any session state is allocated.
-        if (!SessionEngine.verifyInitiator(psk, decoded.plaintext())) {
+        long now = System.currentTimeMillis();
+        if (!retryCookie.verify(from, packet.connectionId(), packet.cookie(), now)) {
+            send(HandshakePacket.retry(packet.connectionId(), retryCookie.mint(from, packet.connectionId(), now + 15_000L)), from);
             return;
         }
         if (sessions.size() >= maxSessions) {
-            // Telling a valid peer we are full is worth the packet; telling an invalid one is not,
-            // which is why this sits after the authenticator check.
-            sendReject(connectionId, from, REJECT_UNAVAILABLE);
+            send(HandshakePacket.reject(packet.connectionId(), REJECT_UNAVAILABLE), from);
             return;
         }
-        Session session = new Session(connectionId, from);
-        sessions.put(connectionId, session);
-        session.engine.onDatagramReceived(datagram, 0, datagram.length);
+        try {
+            Session session = new Session(packet.connectionId(), from);
+            session.engine.acceptInitiatorMessage1(packet.payload());
+            sessions.put(packet.connectionId(), session);
+        } catch (ProtocolException | io.hyperconduit.crypto.NoiseXx.HandshakeException ignored) {
+            // Invalid Noise message 1 does not retain any server state.
+        }
     }
 
     private void transmitAll() throws IOException {
@@ -241,14 +243,11 @@ public final class UdpServerEndpoint implements AutoCloseable {
         }
     }
 
-    /** Exposed for tests and for a session cap; {@link #REJECT_UNAVAILABLE} is the reason code. */
-    private void sendReject(int connectionId, SocketAddress peer, byte reason) {
+    private void send(byte[] datagram, SocketAddress peer) {
         try {
-            byte[] datagram = handshakeCodec.encode(PacketCodec.FLAG_REJECT, connectionId, 0,
-                    new byte[]{reason}, 0, 1);
             channel.send(ByteBuffer.wrap(datagram), peer);
         } catch (IOException ignored) {
-            // a rejection is best-effort; the peer will time out regardless
+            // Retry and rejection packets are best effort.
         }
     }
 

@@ -52,16 +52,21 @@ public final class HyperConduitChannel extends AbstractChannel {
      */
     public record ChannelOptions(
             InetSocketAddress peer,
-            SessionConfig sessionConfig,
+            java.util.function.Function<InetSocketAddress, SessionConfig> sessionConfigFactory,
             Clock clock) {
 
         public ChannelOptions(InetSocketAddress peer, SessionConfig sessionConfig) {
-            this(peer, sessionConfig, Clock.SYSTEM);
+            this(peer, ignored -> sessionConfig, Clock.SYSTEM);
+        }
+
+        public ChannelOptions(InetSocketAddress peer,
+                              java.util.function.Function<InetSocketAddress, SessionConfig> sessionConfigFactory) {
+            this(peer, sessionConfigFactory, Clock.SYSTEM);
         }
 
         /** Peer is resolved at connect time from the address Minecraft passes in. */
         public ChannelOptions(SessionConfig sessionConfig, Clock clock) {
-            this(null, sessionConfig, clock);
+            this(null, ignored -> sessionConfig, clock);
         }
     }
 
@@ -75,6 +80,7 @@ public final class HyperConduitChannel extends AbstractChannel {
     private volatile DatagramChannel datagramChannel;
     private volatile Selector selector;
     private volatile SessionEngine engine;
+    private volatile SessionConfig sessionConfig;
     private volatile Thread driverThread;
     private volatile boolean running;
     private volatile boolean open = true;
@@ -205,7 +211,7 @@ public final class HyperConduitChannel extends AbstractChannel {
             selector = Selector.open();
             datagramChannel.register(selector, SelectionKey.OP_READ);
 
-            engine = SessionEngine.client(options.sessionConfig(), options.clock(), new SessionListener() {
+            engine = SessionEngine.client(sessionConfig, options.clock(), new SessionListener() {
                 @Override
                 public void onPeerConfirmed() {
                     handshaken = true;
@@ -252,9 +258,11 @@ public final class HyperConduitChannel extends AbstractChannel {
                 public void onClosed(int reasonCode, String message) {
                     EventLoop loop = eventLoop();
                     Runnable task = () -> {
+                        IOException closed = new IOException(prefixed(message));
                         if (!connectPromise.isDone()) {
-                            connectPromise.setFailure(
-                                    new IOException("tunnel closed before handshake: " + message));
+                            connectPromise.setFailure(closed);
+                        } else {
+                            pipeline().fireExceptionCaught(closed);
                         }
                         pipeline().fireChannelInactive();
                         close();
@@ -275,7 +283,7 @@ public final class HyperConduitChannel extends AbstractChannel {
                         if (!connectPromise.isDone()) {
                             connectPromise.setFailure(cause);
                         } else {
-                            pipeline().fireExceptionCaught(cause);
+                            pipeline().fireExceptionCaught(new IOException(prefixed(cause.getMessage()), cause));
                         }
                         close();
                     };
@@ -356,6 +364,11 @@ public final class HyperConduitChannel extends AbstractChannel {
         }
     }
 
+    private static String prefixed(String message) {
+        String text = message == null || message.isBlank() ? "connection failed" : message;
+        return text.startsWith("[HyperConduit]") ? text : "[HyperConduit] " + text;
+    }
+
     private void closeDatagramChannel() {
         try {
             if (selector != null) {
@@ -389,6 +402,7 @@ public final class HyperConduitChannel extends AbstractChannel {
                 return;
             }
             HyperConduitChannel.this.tunnelPeer = target;
+            HyperConduitChannel.this.sessionConfig = options.sessionConfigFactory().apply(target);
             // The whole point of this class: the connect promise is NOT completed here. It is
             // completed by the driver's SessionListener when the handshake actually finishes, so
             // "connect succeeded" means "the tunnel can carry bytes", which is what MC assumes

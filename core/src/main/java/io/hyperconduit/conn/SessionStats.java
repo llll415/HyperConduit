@@ -18,5 +18,6 @@ public record SessionStats(
         long bytesReceived,
         long bytesDelivered,
         long queuedToSendBytes,
-        int ptoCount) {
+        int ptoCount,
+        RollingMetrics recent) {
 }

@@ -49,6 +49,8 @@ public final class SessionEngine {
     public static final int CLOSE_REASON_REMOTE = 2;
     /** Handshake timed out, authentication failed, or a protocol error tore the session down. */
     public static final int CLOSE_REASON_ERROR = 3;
+    /** The server intentionally stopped its tunnel listener. */
+    public static final int CLOSE_REASON_SERVER_SHUTDOWN = 4;
 
     private static final byte REJECT_BAD_AUTH = 1;
     private static final byte REJECT_UNAVAILABLE = 2;
@@ -69,7 +71,6 @@ public final class SessionEngine {
     private final ReceivedPacketTracker receivedPackets = new ReceivedPacketTracker();
     private final ReceiveBuffer receiveBuffer;
     private final NoiseXx noise;
-    private final PacketCodec handshakeCodec;
     private final OutBuffer sizeProbe = new OutBuffer(64);
 
     private final ArrayDeque<byte[]> sendQueue = new ArrayDeque<>();
@@ -120,6 +121,7 @@ public final class SessionEngine {
     private long bytesSent;
     private long bytesReceived;
     private long bytesDelivered;
+    private final RollingMetricsTracker rollingMetrics;
 
     /**
      * Run when the engine acquires work it did not have, so a driver blocked in select/poll wakes up
@@ -143,22 +145,18 @@ public final class SessionEngine {
         this.sentPackets.setMaxDatagramSize(config.maxDatagramSize());
         this.receiveBuffer = new ReceiveBuffer(config.receiveWindowBytes());
         this.advertisedMaxOffset = config.receiveWindowBytes();
-        this.handshakeCodec = PacketCodec.forHandshake(HandshakePayload.maskKey(config.pskRef()));
         this.noise = role == SessionConfig.Role.CLIENT
-                ? NoiseXx.initiator(config.staticKey(), config.pskRef())
-                : NoiseXx.responder(config.staticKey(), config.pskRef());
+                ? NoiseXx.initiator(config.staticKey())
+                : NoiseXx.responder(config.staticKey());
 
         long now = clock.nanoTime();
+        this.rollingMetrics = new RollingMetricsTracker(now);
         this.handshakeDeadlineNanos = now + config.handshakeTimeoutNanos();
 
         if (role == SessionConfig.Role.CLIENT) {
             try {
-                byte[] authenticator = HandshakePayload.authenticator(config.pskRef(), noise.ephemeralPublicKey());
-                byte[] payload = HandshakePayload.encodeClientPayload(authenticator, negotiation());
-                byte[] message = noise.writeMessage(payload);
-                this.retryMessage = handshakeCodec.encode(PacketCodec.FLAG_HANDSHAKE, connectionId, 0,
-                        message, 0, message.length);
-                // Due immediately; the retry timer only governs the second and later attempts.
+                byte[] message = noise.writeMessage(HandshakePayload.encodeClientPayload(negotiation()));
+                this.retryMessage = HandshakePacket.initial(connectionId, new byte[0], message);
                 this.retryAtNanos = now;
             } catch (NoiseXx.HandshakeException e) {
                 throw new IllegalStateException("cannot start the handshake", e);
@@ -173,38 +171,13 @@ public final class SessionEngine {
         return new SessionEngine(config, config.connectionId(), clock, listener);
     }
 
-    /**
-     * Builds the responder for an incoming message 1. The caller must already have verified the PSK
-     * authenticator; see {@link #verifyInitiator(byte[], byte[])}.
-     */
+    /** Builds the responder after the endpoint validated the source-bound Retry cookie. */
     public static SessionEngine server(SessionConfig config, int connectionId, Clock clock,
                                        SessionListener listener) {
         if (config.role() != SessionConfig.Role.SERVER) {
             throw new IllegalArgumentException("config is not a server config");
         }
         return new SessionEngine(config, connectionId, clock, listener);
-    }
-
-    /**
-     * Checks message 1's PSK authenticator without constructing a session.
-     *
-     * <p>This works because in XX the initiator's first message is sent before any key exists, so
-     * its payload is plaintext: the layout is {@code ephemeral(32) || authenticator(32) || negotiation}.
-     * A server front end should call this before creating an engine, because accepting the handshake
-     * costs an X25519 keypair generation plus two DH operations, while this costs one HMAC. Without
-     * it, any peer could make the server do that work per packet without knowing the PSK.
-     *
-     * @param message1 the Noise message, i.e. the datagram body of a {@code FLAG_HANDSHAKE} packet
-     * @return true if the sender knows the PSK
-     */
-    public static boolean verifyInitiator(byte[] psk, byte[] message1) {
-        if (message1.length < HandshakePayload.AUTHENTICATOR_LEN + X25519.KEY_LEN) {
-            return false;
-        }
-        byte[] ephemeral = Arrays.copyOfRange(message1, 0, X25519.KEY_LEN);
-        byte[] authenticator = Arrays.copyOfRange(message1, X25519.KEY_LEN,
-                X25519.KEY_LEN + HandshakePayload.AUTHENTICATOR_LEN);
-        return HandshakePayload.verify(psk, ephemeral, authenticator);
     }
 
     // --- driver interface --------------------------------------------------------
@@ -285,25 +258,31 @@ public final class SessionEngine {
             return;
         }
         long now = clock.nanoTime();
+        if (HandshakePacket.isHandshake(data, off, len)) {
+            try {
+                HandshakePacket.Decoded handshake = HandshakePacket.decode(data, off, len);
+                if (handshake.connectionId() != connectionId) {
+                    return;
+                }
+                packetsReceived++;
+                bytesReceived += len;
+                handleHandshakePacket(handshake, now);
+            } catch (ProtocolException ignored) {
+                // Invalid public handshake framing is indistinguishable from unrelated UDP traffic.
+            }
+            return;
+        }
+        if (state == State.HANDSHAKE) {
+            return;
+        }
         PacketCodec.Decoded decoded = tryDecode(data, off, len);
         if (decoded == null || decoded.connectionId() != connectionId) {
             return;
         }
         packetsReceived++;
         bytesReceived += len;
-
-        if (decoded.flags() == PacketCodec.FLAG_REJECT) {
-            byte[] body = decoded.plaintext();
-            int reason = body.length > 0 ? body[0] & 0xFF : 0;
-            // Forgeable only by someone holding the PSK, since the header mask is PSK-derived.
-            fail(new ProtocolException("peer rejected the session, reason " + reason));
-            return;
-        }
-        if (decoded.flags() == PacketCodec.FLAG_HANDSHAKE) {
-            handleHandshake(decoded, now);
-        } else if (state != State.HANDSHAKE) {
-            handleTransportPacket(decoded, now);
-        }
+        rollingMetrics.received(now, len);
+        handleTransportPacket(decoded, now);
     }
 
     // --- application interface ---------------------------------------------------
@@ -392,7 +371,7 @@ public final class SessionEngine {
         return new SessionStats(state, rttStats.smoothedRttNanos(), rttStats.minRttNanos(),
                 sentPackets.bytesInFlight(), sentPackets.congestionWindow(), packetsSent, packetsReceived,
                 sentPackets.lostPackets(), packetsRetransmitted, bytesSent, bytesReceived, bytesDelivered,
-                queuedBytes, sentPackets.ptoCount());
+                queuedBytes, sentPackets.ptoCount(), rollingMetrics.snapshot(clock.nanoTime()));
     }
 
     public synchronized RttStats rttStats() {
@@ -401,50 +380,63 @@ public final class SessionEngine {
 
     // --- handshake ---------------------------------------------------------------
 
-    private void handleHandshake(PacketCodec.Decoded decoded, long now) {
-        if (noise.isComplete()) {
-            return; // a late retransmission of a message we already processed
+    private void handleHandshakePacket(HandshakePacket.Decoded packet, long now) {
+        if (packet.type() == HandshakePacket.TYPE_REJECT) {
+            int reason = packet.payload().length == 0 ? 0 : packet.payload()[0] & 0xFF;
+            fail(new ProtocolException("peer rejected the session, reason " + reason));
+            return;
         }
-        byte[] message = decoded.plaintext();
-        if (role == SessionConfig.Role.SERVER) {
-            handleResponderHandshake(message, now);
-        } else {
-            handleInitiatorHandshake(message, now);
+        if (role == SessionConfig.Role.CLIENT) {
+            if (packet.type() == HandshakePacket.TYPE_RETRY) {
+                if (packet.cookie().length == 0) {
+                    return;
+                }
+                retryMessage = HandshakePacket.initial(connectionId, packet.cookie(), noiseMessage1());
+                retryAtNanos = now;
+                retryDelayNanos = HANDSHAKE_RETRY_INITIAL_NANOS;
+                return;
+            }
+            if (packet.type() == HandshakePacket.TYPE_HANDSHAKE) {
+                handleInitiatorHandshake(packet.payload(), now);
+            }
+            return;
+        }
+        if (packet.type() == HandshakePacket.TYPE_INITIAL) {
+            if (noise.messageIndex() == 0) {
+                try {
+                    acceptInitiatorMessage1(packet.payload());
+                } catch (ProtocolException | NoiseXx.HandshakeException ignored) {
+                    // Direct deterministic drivers model a source that already passed Retry validation.
+                }
+            } else if (cachedMessage2 != null) {
+                handshakeOutbound.add(cachedMessage2);
+            }
+        } else if (packet.type() == HandshakePacket.TYPE_HANDSHAKE) {
+            handleResponderHandshake(packet.payload(), now);
+        }
+    }
+
+    private byte[] noiseMessage1() {
+        try {
+            // Message 1 has already been emitted by the Noise state. It is held as the payload of
+            // retryMessage so a stateless Retry never forces us to restart the Noise transcript.
+            HandshakePacket.Decoded initial = HandshakePacket.decode(retryMessage, 0, retryMessage.length);
+            return initial.payload();
+        } catch (ProtocolException e) {
+            throw new IllegalStateException("client handshake state is corrupt", e);
         }
     }
 
     private void handleResponderHandshake(byte[] message, long now) {
-        if (noise.messageIndex() == 0) {
-            if (!verifyInitiator(config.pskRef(), message)) {
-                return; // no PSK: drop without doing any DH work
-            }
-            try {
-                byte[] payload = noise.readMessage(message);
-                answerInitiatorMessage1(payload, message);
-            } catch (NoiseXx.HandshakeException | ProtocolException e) {
-                // Drop silently. Failing here would let any stray datagram tear down a session.
-                return;
-            }
-            return;
-        }
-        // We are waiting for message 3. Check for a retransmitted message 1 first, and do not feed
-        // one to the handshake state machine: it would fail authentication and, more importantly,
-        // waste crypto on a message we already know the answer to.
-        //
-        // A retransmitted message 1 means our message 2 was lost or is still in flight. Answer from
-        // the cache rather than restarting the handshake -- restarting would generate a fresh
-        // ephemeral key and invalidate the message 3 the initiator is already computing, which
-        // deadlocks the session: it completes, we cannot decrypt anything it sends, and it never
-        // learns why. Answering from cache is idempotent and keeps one handshake in flight.
-        if (cachedMessage2 != null && verifyInitiator(config.pskRef(), message)) {
-            handshakeOutbound.add(cachedMessage2);
+        if (noise.messageIndex() != 2) {
             return;
         }
         try {
             noise.readMessage(message);
             establish();
         } catch (NoiseXx.HandshakeException e) {
-            // Drop silently: a stray or corrupt datagram must not tear down a live session.
+            // A cookie has already proven reachability; malformed message 3 still must not tear
+            // down a server session based on unauthenticated network traffic.
         }
     }
 
@@ -467,43 +459,43 @@ public final class SessionEngine {
         }
         try {
             applyPeerNegotiation(HandshakePayload.decodeServerPayload(payload));
+            byte[] serverIdentity = noise.remoteStaticPublicKey();
+            if (serverIdentity == null || !config.peerIdentityVerifier().verify(serverIdentity)) {
+                fail(new ProtocolException("server identity was not trusted"));
+                return;
+            }
             byte[] message3 = noise.writeMessage(new byte[0]);
             establish();
             // Keep retransmitting message 3 until the peer proves it arrived, otherwise our first
             // data packets would be dropped by a server that never saw it. Due immediately: backing
             // off before the first attempt would add that whole delay to every connection setup.
-            retryMessage = handshakeCodec.encode(PacketCodec.FLAG_HANDSHAKE, connectionId, 0,
-                    message3, 0, message3.length);
+            retryMessage = HandshakePacket.handshake(connectionId, message3);
             retryAtNanos = now;
         } catch (NoiseXx.HandshakeException | ProtocolException e) {
             fail(e);
         }
     }
 
-    /**
-     * Answers message 1 with message 2, caching it so a retransmitted message 1 can be answered
-     * again without disturbing the handshake in progress.
-     *
-     * <p>Message 1 carries only the plaintext ephemeral key, so no DH has happened yet at this
-     * point: verifying the PSK authenticator here is what keeps an unauthenticated peer from making
-     * us perform the two X25519 operations message 2 requires.
-     */
-    private void answerInitiatorMessage1(byte[] payload, byte[] message)
-            throws ProtocolException, NoiseXx.HandshakeException {
-        byte[] ephemeral = HandshakePayload.initiatorEphemeralFromMessage1(message);
-        byte[] authenticator = Arrays.copyOfRange(payload, 0,
-                Math.min(HandshakePayload.AUTHENTICATOR_LEN, payload.length));
-        if (!HandshakePayload.verify(config.pskRef(), ephemeral, authenticator)) {
-            // Unreachable when the endpoint gates on verifyInitiator first, but the engine must not
-            // depend on its caller having done so.
-            reject(REJECT_BAD_AUTH, "PSK authenticator mismatch");
-            return;
+    /** Processes message 1 after the stateless endpoint verified a Retry cookie. */
+    /** Accepts Noise message 1 after the server front end validated a source-bound Retry cookie. */
+    public synchronized void acceptInitiatorMessage1(byte[] message) throws ProtocolException, NoiseXx.HandshakeException {
+        if (role != SessionConfig.Role.SERVER || noise.messageIndex() != 0) {
+            throw new IllegalStateException("not awaiting initiator message 1");
         }
+        byte[] payload = noise.readMessage(message);
         applyPeerNegotiation(HandshakePayload.decodeClientPayload(payload));
         byte[] message2 = noise.writeMessage(HandshakePayload.encodeServerPayload(negotiation()));
-        cachedMessage2 = handshakeCodec.encode(PacketCodec.FLAG_HANDSHAKE, connectionId, 0,
-                message2, 0, message2.length);
+        cachedMessage2 = HandshakePacket.handshake(connectionId, message2);
         handshakeOutbound.add(cachedMessage2);
+    }
+
+    /** Test-only direct handshake entry point for deterministic links that omit the UDP Retry front end. */
+    public synchronized void acceptInitialForTest(byte[] initialDatagram) throws ProtocolException, NoiseXx.HandshakeException {
+        HandshakePacket.Decoded packet = HandshakePacket.decode(initialDatagram, 0, initialDatagram.length);
+        if (packet.type() != HandshakePacket.TYPE_INITIAL || packet.connectionId() != connectionId) {
+            throw new ProtocolException("invalid direct test Initial");
+        }
+        acceptInitiatorMessage1(packet.payload());
     }
 
     private void establish() throws NoiseXx.HandshakeException {
@@ -530,24 +522,11 @@ public final class SessionEngine {
         return new HandshakePayload.Negotiation(config.receiveWindowBytes(), config.maxDatagramSize());
     }
 
-    private void reject(byte reason, String message) {
-        handshakeOutbound.add(handshakeCodec.encode(PacketCodec.FLAG_REJECT, connectionId, 0,
-                new byte[]{reason}, 0, 1));
-        fail(new ProtocolException(message));
-    }
-
     // --- transport ---------------------------------------------------------------
 
     private PacketCodec.Decoded tryDecode(byte[] data, int off, int len) {
-        if (state != State.HANDSHAKE) {
-            try {
-                return recvCodec.decode(data, off, len);
-            } catch (ProtocolException ignored) {
-                // Fall through: a retransmitted handshake message uses the other mask key.
-            }
-        }
         try {
-            return handshakeCodec.decode(data, off, len);
+            return recvCodec.decode(data, off, len);
         } catch (ProtocolException ignored) {
             return null;
         }
@@ -572,7 +551,12 @@ public final class SessionEngine {
                 }
                 case Frame.Ack ack -> {
                     try {
-                        sentPackets.receivedAck(ack, now);
+                        if (sentPackets.receivedAck(ack, now)) {
+                            rollingMetrics.acknowledged(now);
+                            if (rttStats.hasMeasurement()) {
+                                rollingMetrics.rttSample(now, rttStats.latestRttNanos());
+                            }
+                        }
                     } catch (ProtocolException e) {
                         fail(e);
                         return;
@@ -662,6 +646,7 @@ public final class SessionEngine {
             frames.add(frame);
             ackEliciting = true;
             packetsRetransmitted++;
+            rollingMetrics.retransmitted(now);
         }
 
         if (creditUpdateDue()) {
@@ -741,6 +726,7 @@ public final class SessionEngine {
         sentPackets.sentPacket(packetNumber, now, frames, datagram.length, ackEliciting);
         packetsSent++;
         bytesSent += datagram.length;
+        rollingMetrics.sent(now, datagram.length);
         if (ackIncluded) {
             ackPending = false;
         }

@@ -1,6 +1,7 @@
 package io.hyperconduit.netty;
 
 import io.hyperconduit.conn.SessionEngine;
+import io.hyperconduit.conn.SessionStats;
 import io.netty.channel.AbstractChannel;
 import io.netty.channel.ChannelConfig;
 import io.netty.channel.ChannelConfig;
@@ -32,7 +33,7 @@ import java.util.List;
  * connected channel, not one that connects itself. The handshake is done by the time this channel
  * exists, so there is nothing to connect and no driver to start.
  */
-final class HyperConduitServerChildChannel extends AbstractChannel {
+public final class HyperConduitServerChildChannel extends AbstractChannel {
 
     private static final ChannelMetadata METADATA = new ChannelMetadata(false);
     private static final int READ_CHUNK = 64 * 1024;
@@ -69,6 +70,10 @@ final class HyperConduitServerChildChannel extends AbstractChannel {
     @Override
     public boolean isOpen() {
         return open;
+    }
+
+    public SessionStats stats() {
+        return engine.stats();
     }
 
     @Override
