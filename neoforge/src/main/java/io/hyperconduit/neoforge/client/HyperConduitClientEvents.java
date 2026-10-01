@@ -96,7 +96,7 @@ public final class HyperConduitClientEvents {
         String controller = config != null && config.brutal ? "Brutal" : "Paced";
         int rate = config == null ? 0 : config.mbps;
         return java.util.List.of(
-                "§b[HyperConduit]§r §a[运行中]§r §e[" + controller + " " + rate + " Mbps]§r §7[UDP隧道]§r",
+                "§b[HyperConduit]§r §a[运行中]§r §e[" + controller + " " + rate + " Mbps]§r",
                 "§f[链路]§r RTT §b" + millis(stats.smoothedRttNanos()) + "ms§r  §7p95(10s) §f"
                         + millis(recent.p95RttNanos()) + "ms§r  " + lossTag(recent.lossRate()) + "  "
                         + retransTag(recent.retransmitsPerSecond()),

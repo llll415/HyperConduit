@@ -97,7 +97,7 @@ public final class HyperConduitServerEvents {
             txRate += recent.txBytesPerSecond();
             rxRate += recent.rxBytesPerSecond();
             retransRate += recent.retransmitsPerSecond();
-            lines.add("§b[HyperConduit]§r §f[" + player.getGameProfile().getName() + "]§r §7[UDP隧道]§r"
+            lines.add("§b[HyperConduit]§r §f[" + player.getGameProfile().getName() + "]§r"
                     + " §fRTT §b" + ms(stats.smoothedRttNanos()) + "ms§r §7p95(10s) §f"
                     + ms(recent.p95RttNanos()) + "ms§r " + lossTag(recent.lossRate()) + " "
                     + retransTag(recent.retransmitsPerSecond()) + " §a↓ " + rate(recent.txBytesPerSecond())
