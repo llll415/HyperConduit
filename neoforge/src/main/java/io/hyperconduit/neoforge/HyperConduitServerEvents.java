@@ -55,10 +55,15 @@ public final class HyperConduitServerEvents {
         lines.add("[HyperConduit] 服务端 | " + configStatus(config));
         if (server == null) return lines;
 
-        long tx = 0, rx = 0, retrans = 0;
-        int tunnels = 0, vanilla = 0;
+        long txRate = 0, rxRate = 0;
+        double retransRate = 0;
+        int tunnels = 0, vanilla = 0, local = 0;
         for (ServerPlayer player : server.getPlayerList().getPlayers()) {
             Channel channel = player.connection.getConnection().channel();
+            if (channel instanceof io.netty.channel.local.LocalChannel) {
+                local++;
+                continue;
+            }
             if (!(channel instanceof HyperConduitServerChildChannel tunnel)) {
                 vanilla++;
                 continue;
@@ -66,16 +71,17 @@ public final class HyperConduitServerEvents {
             tunnels++;
             SessionStats stats = tunnel.stats();
             RollingMetrics recent = stats.recent();
-            tx += stats.bytesSent();
-            rx += stats.bytesReceived();
-            retrans += stats.packetsRetransmitted();
+            txRate += recent.txBytesPerSecond();
+            rxRate += recent.rxBytesPerSecond();
+            retransRate += recent.retransmitsPerSecond();
             lines.add("[HyperConduit] " + player.getGameProfile().getName()
                     + " | RTT " + ms(stats.smoothedRttNanos()) + "ms p95 " + ms(recent.p95RttNanos())
                     + "ms | loss " + percent(recent.lossRate()) + " | retrans " + recent.retransmitsPerSecond()
                     + "/s | ↓ " + rate(recent.txBytesPerSecond()) + " ↑ " + rate(recent.rxBytesPerSecond()));
         }
-        lines.add("[HyperConduit] 总计 | 隧道 " + tunnels + " | 原版TCP " + vanilla
-                + " | ↓ " + bytes(tx) + " ↑ " + bytes(rx) + " | retrans " + retrans);
+        lines.add("[HyperConduit] 总计 | 隧道 " + tunnels + " | 原版TCP " + vanilla + " | 本地 " + local
+                + " | ↓ " + rate(txRate) + " ↑ " + rate(rxRate)
+                + " | retrans " + String.format(Locale.ROOT, "%.1f/s", retransRate));
         return lines;
     }
 
