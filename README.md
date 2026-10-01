@@ -1,277 +1,72 @@
-# HyperConduit 技术报告与设计规范
-
-HyperConduit 是一个专为 Minecraft 1.21.1 (NeoForge / Java 21) 设计的 **QUIC-like + Brutal-like** 自研传输层隧道系统。
-
-本项目**不依赖任何外部 C 动态库、外部代理二进制或第三方通用 QUIC 框架**（非 gost / Clash / v2ray 包装，亦非引入重量级通用 QUIC 依赖），而是直接参考 **RFC 9000 (QUIC)**、**apernet/quic-go** 与 **Hysteria 2 (Brutal)** 的底层协议设计，在 **Java 21 + Netty** 架构下从零自主实现的可靠 UDP 传输引擎与速率自适应拥塞控制系统。
-
-其设计原则为：**只替换底层字节流承载，完全不侵入 Minecraft 原版逻辑**。Minecraft 的协议序列化、登录认证、Mojang/第三方正版校验、白名单、封禁系统以及服务端反作弊机制均运行于其原始状态，隧道仅作为透明的高性能、抗丢包可靠字节管道工作。
-
----
-
-## 1. 协议栈整体架构
-
-```text
-+-------------------------------------------------------------------+
-|               Minecraft Protocol (VarInt 字节流)                  |
-|                 (登录 / 认证 / 世界同步 / 游戏逻辑)                  |
-+-------------------------------------------------------------------+
-                                  │
-                                  ▼
-+-------------------------------------------------------------------+
-|                HyperConduit Netty 适配层                          |
-|         (HyperConduitChannel / HyperConduitServerChannel)         |
-+-------------------------------------------------------------------+
-                                  │
-       ┌──────────────────────────┴──────────────────────────┐
-       ▼                                                     ▼
-+─────────────────────────────────+   +─────────────────────────────+
-|     QUIC-like 可靠传输引擎       |   |   Noise XX 加密与身份认证   |
-|  - Packet Numbering (隐式单调)  |   |  - Noise_XX_25519_ChaCha... |
-|  - 离散 / 连续 ACK Ranges        |   |  - Zero-PSK (免预共享密钥)   |
-|  - RFC 9002 丢包检测与 PTO       |   |  - X25519 自动身份生成      |
-|  - 基于 Offset 的 Stream 流控    |   |  - 客户端 TOFU 指纹信任     |
-|  - 令牌桶平滑起搏器 (Pacer)      |   |  - 无状态 Retry Cookie 防放大|
-+─────────────────────────────────+   +─────────────────────────────+
-       │                                                     │
-       └──────────────────────────┬──────────────────────────┘
-                                  ▼
-+-------------------------------------------------------------------+
-|                     拥塞控制层 (Brutal / Paced)                    |
-|    - Brutal: 目标带宽 + 令牌桶起搏 + 滑动窗口丢包率动态补偿 (有界)    |
-|    - Paced: 目标带宽 + 令牌桶起搏 (关闭丢包补偿)                   |
-+-------------------------------------------------------------------+
-                                  │
-                                  ▼
-+-------------------------------------------------------------------+
-|                      UDP 传输层 (单端口复用)                        |
-+-------------------------------------------------------------------+
-```
-
----
-
-## 2. 自研 QUIC-like 可靠传输引擎 (`core`)
-
-RFC QUIC 为多路复用与复杂 Web 语义设计，其流调度与头阻塞消除带来庞大开销。Minecraft 连接本质上是单一严格时序依赖的 VarInt 字节流。因此，HyperConduit 裁撤了对游戏无意义的多流复用（Multiplexing），集中实现针对单虚拟流的极低延迟、轻量级可靠 UDP 状态机（`SessionEngine`）。
-
-### 2.1 报文与帧格式 (Packet & Frame Architecture)
-
-数据报文设计兼顾解析效率、抗指纹识别（DPI 混淆）与服务端多会话调度：
-
-```text
-0                   1                   2                   3
-0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-|                      Connection ID (4 字节, 明文)              |
-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-| Flags (1 字节) |             Packet Number (4 字节)           |  <- 掩码混淆
-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-|                ChaCha20-Poly1305 加密载荷 (Frames)             |
-|                               ...                             |
-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-|                     Poly1305 AEAD Tag (16 字节)               |
-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-```
-
-1. **Connection ID (CID, 4 字节明文)**：保留明文 CID 是为了让服务端单套接字在解密前通过 O(1) 路由将会话分发给对应的 `Session`，避免多用户竞争与解密回滚。
-2. **头部混淆 (Header Masking)**：`Flags` 与 `Packet Number` 经 `HMAC-SHA256(maskKey, body)[0..5]` 异或掩码混淆。单调递增的包计数器对外呈现伪随机分布，有效规避基于特征计数的深度报文检测。
-3. **认证绑定 (AAD)**：未保护的明文头部作为 AAD 参与 AEAD 校验，篡改 CID、Flags 或包号将直接导致认证失败。
-
-### 2.2 帧类型定义 (`Frame`)
-
-所有帧均封装于 AEAD 密文内部，杜绝明文泄露：
-
-- `StreamData(long offset, byte[] data)`：承载绝对字节偏移的应用数据，接收端对未到达的空洞（Gaps）执行环形暂存，按序重组后提交给 Netty。
-- `Ack(long ackDelayMicros, List<AckRange> ranges)`：聚合区间确认帧。通过区间编码（`smallest` 到 `largest`）汇报接收集合，极大降低高丢包与高吞吐下的 ACK 帧体积膨胀。
-- `MaxData(long maxOffset)`：滑动流控窗口信用通告，限制对端在未经确认前可发送的最高字节偏移，防止发送端冲垮接收端缓冲区。
-- `Ping()`：显式触发对端回送 ACK 的探测包（Ack-Eliciting），用于链路保活与 PTO 探测。
-- `Close(int reasonCode, String message)`：传输层挥手帧，携带断开原因（正常停服、协议错误、主动挂断）。
-
-### 2.3 丢包检测与探针超时 (RFC 9002 Loss Detection & PTO)
-
-1. **双阈值丢包判定**：
-   - **包号阈值 (Packet Threshold)**：当收到包号比已发送包高出 `PACKET_THRESHOLD = 3` 的 ACK 时，判定落后包丢失。
-   - **时间阈值 (Time Threshold)**：判定时差达到 `TIME_THRESHOLD = 9/8 * max(smoothedRtt, latestRtt)` 即触发丢失。
-2. **RFC 6298 平滑 RTT 采样**：
-   - 首个采样直接初始化 RTT 状态；后续采样按 $\text{sRTT} \leftarrow \frac{7}{8}\text{sRTT} + \frac{1}{8}\text{latestRTT}$ 持续迭代；
-   - 自动扣除接收端上报的 `ackDelayMicros`，计算高精度 `jitter`（抖动）。
-3. **Probe Timeout (PTO) 机制**：
-   - 当发送端发送完数据进入静默，且所有传输中包均未收到确认时，丢包检测定时器无法通过新包的 ACK 推进；
-   - PTO 驱动发送端发出 `Ping` 探测帧，强迫对端回传 ACK，彻底避免因尾丢包（Tail Loss）引发的长达数秒的假死卡顿。
-
-### 2.4 令牌桶发包起搏器 (Token-Bucket Pacer)
+# HyperConduit
 
-起搏器移植自 Hysteria `internal/congestion/common/pacer.go`，由 `Pacer.java` 驱动：
-- 针对拥塞控制器给出的目标速率，在纳秒级粒度计算发包配额（`budget`）与下次发包等待时间（`nanosUntilSend`）。
-- 设定突发硬顶（`MAX_BURST_PACKETS = 10`），将原本集中在一个时钟中断涌出的突发数据（Burst）均匀平滑在整个 RTT 周期内，消除网络中间件缓冲区爆满引发的主动丢包。
+> **声明**
+>
+> - HyperConduit 是一个仍在验证中的 **Vibe Coding** 项目，不是经过完整安全审计或大规模生产验证的网络产品。请先在可控环境测试，并保留原版 TCP 回退。
+> - 本项目参考 Hysteria 2 的 Brutal 思路：当确认率下降时，`Brutal` 会在严格上限内提高发送速率以补偿丢包。这是一种偏激进的发包策略；错误设置带宽、共享网络使用，或遇到运营商对 UDP/异常流量的策略时，可能影响同网络中的其他业务，也可能触发限速、丢包或阻断。使用者应自行承担相应网络风险。
+> - 这里的 **QUIC-like** 与 **Brutal-like** 表示“参考相关机制自行实现”，**不是 RFC 9000 QUIC 实现**，也不与浏览器 QUIC、HTTP/3 或其他通用 QUIC 端点互通。
 
----
+HyperConduit 是面向 **Minecraft 1.21.1 NeoForge** 的双端 UDP 隧道 Mod。它把 Minecraft 已有的 Netty 字节流管线承载到自定义的可靠 UDP 传输中；Minecraft 游戏协议、登录与认证流程、白名单、封禁及其他上层服务端逻辑仍由原版处理。
 
-## 3. 自研 Brutal-like 拥塞控制机制
+当前版本：**Minecraft 1.21.1 / NeoForge 21.1.252 / Java 21**。
 
-### 3.1 Brutal 核心设计哲学
+## 它做什么
 
-传统 TCP 拥塞控制（如 Reno、Cubic）基于 **AIMD (加法增大、乘法减小)** 模型，其底层假设是：“丢包必然代表网络链路缓冲区过载”。但在跨运营商互联或公网复杂路由中，人为政策丢包或链路随机扰动非常普遍。在此类路径上，传统算法遇丢包即自断带宽折半退让，导致吞吐断崖式下跌。
+- 客户端和服务端均启用后，Minecraft 连接通过 HyperConduit 的加密可靠 UDP 隧道传输。
+- 默认关闭。关闭时客户端保留原版 TCP 连接方式。
+- 不需要填写 PSK、单独的隧道地址或监听地址：客户端直接使用服务器列表中的 `host:port`。
+- 服务端可让原版 TCP 与 HyperConduit UDP 使用同一个端口号共存；也可选择仅接受 HyperConduit 连接。
+- 提供游戏内配置入口、F3 链路状态、`/hyperconduit status` 和服务端 `watch` 监控。
+- 当前只支持 NeoForge；Fabric 尚未实现。
 
-Brutal 的哲学是**面向固定预留带宽的自适应补偿**：以用户配置的目标物理带宽为锚点，丢包时不仅不退缩，反而动态计算丢包率并适度提升发包速率，以确保接收端能够恒定收到足额的有效数据。
+## 安装与使用
 
-### 3.2 数学模型与算法实现 (`BrutalCc.java`)
+1. 客户端与服务端安装相同版本的 `hyperconduit-neoforge-0.1.0.jar`。
+2. 启动游戏后，在**多人游戏**或**开放局域网联机**界面点击 `HyperConduit…`。
+3. 打开“启用”，设置本端发送带宽与控制模式；默认是 `10 Mbps + Brutal`。
+4. 玩家仍像原版一样填写服务器 IP 和端口加入。无需额外部署代理或填写密钥。
 
-```text
-               bps * sRTT * 2
-拥塞窗口 cwnd = ────────────────
-                   ackRate
+设置保存后，只会在**下一次连接**或**下一次开放局域网**时应用；不会热切换已经建立的会话。
 
-                bps
-起搏速率 paceRate = ─────────
-                   ackRate
-```
+### 连接要求与兼容性
 
-- **滑动采样窗口**：
-  采用 5 个 1 秒时间槽（`PKT_INFO_SLOT_COUNT = 5`）循环记录最近 5 秒内确认包与丢失包的绝对数量。
-- **样本数防抖**：
-  当最近窗口内累计样本数未达到 `MIN_SAMPLE_COUNT = 50` 时，强制 `ackRate = 1.0`，避免冷启动阶段因少数丢包样本引发起搏速率畸高。
-- **有界熔断保护**：
-  为防止网络完全断开时发送速率无限发散引发恶性雪崩，`ackRate` 强制设定硬下限 `MIN_ACK_RATE = 0.8`。这意味着 Brutal 的最大丢包补偿倍数严格限制在 $1.25\times$，在抗丢包与公网道德之间取得平衡。
+- 隧道需要**客户端和服务端都安装并启用** HyperConduit。
+- 服务器默认 `disableVanillaTcp=false`：未安装 Mod 的玩家仍可通过原版 TCP 加入；启用 Mod 的玩家使用 UDP 隧道。TCP 与 UDP 是不同传输协议，因此可使用同一端口号。
+- 服务端若设置 `disableVanillaTcp=true`，将不再创建原版 TCP listener，只接受 HyperConduit UDP 会话。
+- 单人游戏与本地回路连接不经过 HyperConduit；客户端也不会用隧道连接 `localhost`、loopback 或 wildcard 地址。
 
-### 3.3 Brutal 与 Paced 模式对比
+## 控制模式：Brutal 与 Paced
 
-| 控制模式 | 发送带宽控制 | 令牌桶起搏 (Pacer) | 丢包重传保障 | 丢包补偿计算 (`ackRate`) | 适用场景 |
-| :--- | :--- | :--- | :--- | :--- | :--- |
-| **Brutal** (默认) | 固定配置值 (Mbps) | 有 (微秒打散) | 完整具备 | **开启** (动态上调发包率) | 存在非拥塞性随机丢包、跨运营商晚高峰恶劣链路 |
-| **Paced** | 固定配置值 (Mbps) | 有 (微秒打散) | 完整具备 | **关闭** (`ackRate` 恒为 1.0) | 带宽严格受限或不允许超额发包的普通公网链路 |
+带宽配置是**逐方向、按本端发送侧**生效的：
 
-> **技术澄清**：`Paced` **不是** TCP Reno / Cubic，**不是** BBR，也**不是** RFC QUIC 的默认拥塞控制算法。它是 HyperConduit 内部在关闭了 Brutal 丢包率动态膨胀补偿之后、依然保留固定目标带宽与高精度令牌桶起搏的受控发送模式。
+- 服务端的 `mbps` 控制服务端 → 玩家方向；
+- 客户端的 `mbps` 控制玩家 → 服务端方向；
+- 它是人工配置的目标发送速率，不是链路容量自动探测值。请按自己的上行、下行和共享网络情况谨慎设置。
 
-### 3.4 BBRv1 演进评估
+| 模式 | 目标带宽 | 起搏器 | 丢包补偿 | 如何选择 |
+| --- | --- | --- | --- | --- |
+| **Brutal**（默认） | 使用配置的 `mbps` | 使用 | 开启，有严格上限 | 已确认链路存在非拥塞性丢包，且接受为保持交付率而额外发包时使用。 |
+| **Paced** | 使用配置的 `mbps` | 使用 | 关闭 | 希望固定按配置速率发送，不希望因为丢包提高实际发送速率时使用。 |
 
-项目内部已对引入 BBR 进行了全面架构评审：
-1. **可行性**：现有的 `CongestionController` 接口、ACK/Loss 回调流以及高精度 `Pacer` 完全能够支撑 BBR 接入。
-2. **缺失组件**：BBR 依赖 delivery-rate 采样模型（需对每个在途中数据包打上精确的发送时间戳与交付率快照）、app-limited（应用层饥饿）状态跟踪，以及完整的 `Startup`、`Drain`、`ProbeBW`、`ProbeRTT` 四阶段状态机。
-3. **工程评估**：预估工作量为 8~12 人日，属于高复杂度状态机改造。目前作为未来第三拥塞控制选项规划，不替代现有的 Brutal。
+### Brutal
 
----
+`Brutal` 是 HyperConduit 对 Hysteria 2 Brutal 思路的 Java 实现与裁剪。它不会像 Reno/CUBIC 一样在发现丢包时做传统的乘法减窗；而是以配置带宽为基准，根据最近确认包与丢失包的比例做**有限补偿**，以提高接收端的有效交付率。
 
-## 4. Zero-PSK 安全架构与防反射握手
+这不意味着它保证带宽或保证低延迟。若配置速率超过真实可用容量，或路径本身确实拥塞，Brutal 仍可能制造更多排队、重传和丢包。请从保守值开始测试。
 
-### 4.1 密码学技术选型
+### Paced
 
-HyperConduit 采用纯 JDK 21 标准库密码学实现，无需额外引入 BouncyCastle 或 Native 库：
-- **密钥协商**：X25519 (RFC 7748)
-- **对称加密**：ChaCha20-Poly1305 AEAD (RFC 7539 / 8439)
-- **密钥派生与哈希**：HKDF-SHA256 (RFC 5869) / HMAC-SHA256
+`Paced` 仍然使用相同的可靠重传层与令牌桶起搏器，只是关闭 Brutal 的丢包补偿：它始终以配置的目标速率起搏发送。
 
-### 4.2 Noise_XX 握手流程
+`Paced` **不是** Reno、CUBIC、BBR，也不是标准 QUIC 的默认拥塞控制算法；它是本项目内部“固定目标速率 + 起搏、无丢包补偿”的模式。
 
-握手协议基于 Noise 协议框架中的 `Noise_XX_25519_ChaChaPoly_SHA256` 模式。双方均无需事先配置任何预共享密钥（Zero-PSK）：
+## 配置与身份信任
 
-```text
-客户端 (Initiator)                                服务端 (Responder)
-       │                                                 │
-       │  1. Initial(Cookie="", Noise e)                 │
-       ├────────────────────────────────────────────────>│ (校验 Cookie: 无效)
-       │                                                 │
-       │  2. Retry(Cookie)                               │
-       │<────────────────────────────────────────────────┤ (无状态 HMAC 签发)
-       │                                                 │
-       │  3. Initial(Cookie, Noise e)                    │
-       ├────────────────────────────────────────────────>│ (校验 Cookie: 成功)
-       │                                                 │ (分配会话, 执行 DH)
-       │  4. Handshake(Noise e, ee, s, es)               │
-       │<────────────────────────────────────────────────┤
-       │ (客户端校验服务端公钥 s 指纹: TOFU)               │
-       │                                                 │
-       │  5. Handshake(Noise s, se)                      │
-       ├────────────────────────────────────────────────>│
-       │                                                 │
-       │  6. 握手确认 (Transport Ping/Ack)                │
-       │<────────────────────────────────────────────────┤ (建立连接完成)
-       │                                                 │
-       ▼                                                 ▼
-               [派生双向独立 Transport Keys 进入密文传输]
-```
-
-### 4.3 无状态 Retry Cookie (防御反射放大与 DoS)
-
-UDP 易受到源地址伪造与反射放大攻击。为防止伪造的 Initial 包导致服务端无节制分配会话或计算昂贵的 X25519 DH，引入了类似 RFC 9000 的无状态 Cookie 机制（`RetryCookie.java`）：
-- 服务端内存中维持当前与上一代随机密钥（每 60 秒轮换一次）；
-- Cookie 内容由 `Expiry (8 字节) + HMAC-SHA256(Secret, Client_IP || Client_Port || CID || Expiry)[0..16]` 构成；
-- 只有握手客户端能够成功回显合法 Cookie 时，服务端才会正式创建 `Session` 并进入昂贵的密码学握手阶段。
-
-### 4.4 身份持久化与 TOFU 机制
-
-- **服务端**：首次以服务端身份运行自动生成长期 X25519 密钥对并持久化于 `config/hyperconduit-server-identity.json`；
-- **客户端**：首次连接某 `host:port` 时自动记录其公钥 SHA-256 指纹到 `config/hyperconduit-known-servers.json`（TOFU 机制）；后续若遇到公钥变动将抛出 `IdentityChangedException` 阻断连接，防御公网中间人欺骗。
-
----
-
-## 5. Netty 管道集成与生命周期
-
-### 5.1 Netty 架构映射
-
-HyperConduit 自定义了 Netty Channel 实现，直接嵌入 Minecraft 的网络管线：
-- **客户端**：`HyperConduitChannel` 继承 `AbstractChannel`，接管 `Bootstrap.connect()`；
-- **服务端**：`HyperConduitServerChannel` 负责监听 UDP 端口，解复用 CID 并为每个客户端生成派生通道 `HyperConduitServerChildChannel` 接入 Minecraft 原始 Pipeline。
-
-### 5.2 优雅停服 (Graceful Shutdown)
-
-服务端停机（`ServerStoppingEvent`）触发时：
-- 服务端向所有存活客户端定向广播 `CLOSE(reason=SERVER_SHUTDOWN, "[HyperConduit] Server is shutting down")`；
-- 开放 1.5 秒的 Drain 冲刷窗口以确保最后的确认帧发出，而后主动销毁套接字；
-- 客户端在毫秒级收到停服原因并平稳断开，避免原版在 UDP 丢失时卡死 30 秒至超时断开的体验。
-
----
-
-## 6. 功能特性概述
-
-除底层传输与拥塞控制核心外，系统内建以下配套特性：
-
-1. **同端口单套接字共存**：服务端 UDP 默认自动绑定 Minecraft 正在监听的相同端口。配置 `disableVanillaTcp=false` 时，原版 TCP 与 UDP 隧道同端口共存（未装 Mod 走 TCP，已装走 UDP）；配置为 `true` 时可独占端口。
-2. **零手动网络配置**：已移除旧版的 `psk`、`tunnelServer`、`listenAddress` 等繁琐参数，客户端直接读取玩家填写的服务器地址，主机自动适配局域网广播。
-3. **图形化界面 (GUI)**：在游戏内“多人游戏”与“开放局域网”界面提供配置入口，支持直观调整带宽、切换 Brutal/Paced 以及管理已信任的服务器指纹。
-4. **双端遥测与监控**：
-   - 客户端 F3 / 指令实时输出链路质量；
-   - 遥测严格区分：**当前 1 秒瞬时速率**（↓/↑/实时重传率）与 **近 10 秒窗口指标**（丢包率/抖动/p95 RTT）；
-   - 服务端提供全员汇总与独立玩家状态查询。
-
----
-
-## 7. 使用方法与操作指南
-
-### 7.1 安装与启动
-
-1. 客户端与服务端均需安装对应版本的 Mod Jar 包（如 `hyperconduit-neoforge-0.1.0.jar`）；
-2. 启动游戏，在多人游戏列表或局域网联机界面点击 **`HyperConduit…`** 按钮；
-3. 将 **启用** 开关设为 `开启`，配置发送带宽（默认 10 Mbps）与模式（默认 Brutal）；
-4. 玩家直接输入原版服务器 IP 和端口加入，无需进行额外的网络隧道搭建。
-
-> **注意**：带宽设置属于**本端发送侧控制**。服务端配置决定服务端到玩家的下行速率，客户端配置决定玩家到服务端的数据上传速率。
-
-### 7.2 调试与状态指令
-
-所有命令均使用完整命名空间：
-
-- **查看当前链路状态**：
-  ```text
-  /hyperconduit status
-  ```
-  - **客户端执行**：在聊天框返回与 F3 相同的本机隧道遥测（RTT、p95 RTT、丢包率、瞬时上传/下载速率等）。
-  - **服务端 / 控制台执行**：打印当前所有在线玩家的连接类型（隧道 / 原版 TCP / 本地回路）、各自的实时速率与丢包统计，以及全服总计。
-
-- **服务端常驻实时监控**：
-  ```text
-  /hyperconduit watch
-  ```
-  开启后每秒输出一次全服隧道实时状态，适合服主在独立终端持续观察链路波动。
-  ```text
-  /hyperconduit watch stop
-  ```
-  停止状态持续输出。
-
-### 7.3 配置文件示例 (`config/hyperconduit.json`)
+常规设置建议在游戏内 `HyperConduit…` 界面修改。配置文件位于 `config/hyperconduit.json`：
 
 ```json
 {
-  "enabled": true,
+  "enabled": false,
   "mbps": 10,
   "brutal": true,
   "disableVanillaTcp": false,
@@ -280,32 +75,155 @@ HyperConduit 自定义了 Netty Channel 实现，直接嵌入 Minecraft 的网�
 }
 ```
 
-- `enabled`：是否启用隧道（默认 `false`，未开启时严格回退为原版 TCP）。
-- `mbps`：本端单向发送目标带宽（Mbps）。
-- `brutal`：是否启用 Brutal 丢包补偿（`true` 为 Brutal，`false` 为 Paced）。
-- `disableVanillaTcp`：服务端是否屏蔽原生 TCP 连接（默认 `false` 允许共存）。
-- `receiveWindowBytes` / `sendBufferBytes`：底层滑动流控缓冲区大小（默认 4 MiB）。
+| 字段 | 含义 |
+| --- | --- |
+| `enabled` | 是否启用本端 HyperConduit；默认 `false`，关闭时为原版 TCP。 |
+| `mbps` | 本端单向目标发送带宽，单位 Mbps。 |
+| `brutal` | `true` 为 Brutal；`false` 为 Paced。 |
+| `disableVanillaTcp` | 仅服务端监听策略：`true` 时不接受原版 TCP。 |
+| `receiveWindowBytes` | 传输层接收流控窗口，默认 4 MiB。 |
+| `sendBufferBytes` | 应用数据待发送缓冲上限，默认 4 MiB。 |
+
+### 无 PSK 与首次信任
+
+HyperConduit 不要求玩家手工维护 PSK：
+
+- 服务端首次运行时自动生成长期 X25519 身份并保存到 `config/hyperconduit-server-identity.json`。
+- 客户端首次连接一个 `host:port` 时，采用 TOFU（首次使用即信任）保存服务端公钥指纹到 `config/hyperconduit-known-servers.json`。
+- 同一地址后续出现不同身份时，客户端不会静默替换记录，会拒绝连接。可在 `HyperConduit… → 已信任服务器…` 中查看并删除旧记录；删除后下一次连接会重新执行首次信任。
+
+## 状态与命令
+
+客户端按 `F3` 可看到类似以下的 HyperConduit 状态行：
+
+```text
+[HyperConduit] [运行中] [Brutal 10 Mbps]
+[链路] RTT 12ms  p95(10s) 24ms  丢包(10s) 0.0%  重传 0.0/s
+[速率] ↓ 937 B/s  ↑ 32 B/s  抖动(10s) 1ms
+```
+
+- `↓`、`↑` 与 `重传` 显示当前统计秒内的累计值；
+- `p95(10s)` 与 `抖动(10s)` 使用最近十秒窗口；
+- 当前版本的 `丢包(10s)` 统计尚未完整接入传输层丢失事件，**请勿将其作为可靠的诊断依据**；
+- 丢包显示达到 2.5% 时为红色，重传大于 0 时为黄色。
+
+命令使用完整名称：
+
+```text
+/hyperconduit status
+```
+
+- 客户端执行：显示与客户端 F3 同源的本机状态。
+- 服务端或控制台执行：显示所有玩家的隧道、原版 TCP、本地连接统计及隧道汇总。
+
+服务端可开启持续观察：
+
+```text
+/hyperconduit watch
+/hyperconduit watch stop
+```
+
+`watch` 每 20 个服务器 tick（通常约一秒）输出一次状态。
 
 ---
 
-## 8. 构建与工程结构
+# 技术说明
 
-### 8.1 模块划分
+下面内容面向希望了解实现边界的读者。HyperConduit 的协议、密码学和拥塞控制代码位于 `:core`；它没有依赖 Minecraft API，也不引入第三方通用 QUIC 协议栈。实现参考 QUIC / quic-go 的可靠 UDP 机制及 Hysteria 2 的 Brutal、Pacer 设计，再以 Java 21 实现并按 Minecraft 单字节流场景裁剪。
 
-- `:core`：独立协议库。包含 Noise XX 握手、帧编解码、QUIC-like 可靠传输引擎（`SessionEngine`）、Brutal/Paced 拥塞控制及起搏器。**零 Minecraft 依赖**，含纯 Java 确定性模拟丢包与延迟测试套件。
-- `:mod-common`：跨平台通用逻辑。包含 JSON 存储、TOFU 身份系统及 Netty 通用 Mixin。
-- `:neoforge`：NeoForge 1.21.1 平台适配。包含事件总线监听、GUI 渲染、F3 调试面板接入与 Minecraft 服务端指令系统。
+## QUIC-like 的边界
 
-### 8.2 编译与产物输出
+HyperConduit 是自定义的单字节流可靠 UDP 协议，借鉴了 QUIC 的 Connection ID、包号确认区间、RTT/PTO、基于包号与时间阈值的丢包检测及流控机制；它**不是** RFC 9000 wire format：
 
-需要 JDK 21 环境：
+- 一个 `SessionEngine` 只承载一个有序字节流，不实现多流复用、HTTP/3 或标准 QUIC 互操作；
+- 每名玩家对应独立 Session，拥有独立的拥塞控制器与 Pacer；
+- 建立后数据包使用自定义的 4 字节明文 CID、flags、32 位 packet number 和 AEAD 密文负载；
+- 建立前的 v2 握手使用独立明文 envelope（魔数、版本、类型、CID、Cookie/载荷长度），不与建立后的传输包格式混用。
+
+### 可靠传输与流控
+
+建立后的传输帧在 ChaCha20-Poly1305 AEAD 保护下编码：
+
+- `StreamData(offset, data)`：用绝对字节偏移承载数据。接收端缓存乱序片段、忽略重复片段，只有填补缺口后才按顺序交付；
+- `Ack(ackDelayMicros, ranges)`：以区间/gap 形式确认包号集合；
+- `MaxData(maxOffset)`：接收方授予的最高可发送字节偏移，实现接收窗口流控；
+- `Ping()`：ack-eliciting 探测帧；
+- `Close(reasonCode, message)`：传输层关闭帧。
+
+发送端以两种阈值判定丢包：包号阈值为 3；时间阈值为 `9 / 8 × max(latest RTT, smoothed RTT)`。已判丢失的 `StreamData`、`MaxData` 和 `Close` 会排入重传队列。PTO 超时会提供探测发送机会；若没有其他可用的 ack-eliciting 帧，则发送 `Ping` 请求 ACK。
+
+### 传输包保护
+
+传输包的 CID 保持明文，供服务端在解密前定位 Session。flags 与 packet number 使用基于 `HMAC-SHA256(maskKey, body)` 的前 5 字节进行异或掩码；原始未掩码头部作为 AEAD AAD 参与认证。此处的掩码是协议实现细节，不承诺规避任意网络识别或策略系统。
+
+## Brutal-like 的实现细节
+
+`BrutalCc` 的目标不是估测或探测链路容量，而是以用户配置的 `bps`（每秒字节数）为锚点。其公式为：
+
+```text
+               bps × sRTT × 2
+cwnd      = ───────────────────
+                   ackRate
+
+                 bps
+paceRate = ───────────
+              ackRate
+```
+
+- 在五个一秒时间槽中累计确认包数与丢失包数；
+- 总样本数少于 50 时，固定 `ackRate = 1.0`，避免冷启动时由少量样本触发补偿；
+- 正常情况下 `ackRate` 最低为 `0.8`，因此补偿上限为配置速率的 `1 / 0.8 = 1.25` 倍；
+- `brutal=false` 时仍使用 `BrutalCc` 与同一 Pacer，但固定 `ackRate = 1.0`，即 Paced 模式。
+
+### Pacer
+
+`Pacer` 参考 Hysteria 的 common pacer 设计，使用令牌桶预算决定“现在是否可发送”及“下一次可发送的等待时间”。它限制连续突发额度，并按当前 pacing rate 补充预算。
+
+内部时间以纳秒值计算，但实现的最小起搏延迟是 **1 ms**；请不要把它理解为微秒级或硬实时调度器。
+
+## 安全与握手
+
+密码学实现仅使用 JDK 21 原语：X25519、ChaCha20-Poly1305、HKDF-SHA256 与 HMAC-SHA256。握手模式为：
+
+```text
+Noise_XX_25519_ChaChaPoly_SHA256
+
+-> e
+<- e, ee, s, es
+-> s, se
+```
+
+实际连接先经过无状态 Retry：客户端首次 Initial 不携带有效 Cookie，服务端返回 Cookie；客户端回显合法 Cookie 后，服务端才分配 Session 并执行 Noise 工作。Cookie 绑定源 IP、源 UDP 端口、CID 与过期时间，HMAC 密钥保留当前和上一代并定期轮换。这样可减少伪造 UDP Initial 触发会话分配和昂贵密钥协商的机会。
+
+Noise XX 完成后为两个方向派生独立传输密钥；客户端会在发送最后一个握手消息前验证服务端静态身份，从而实现上文所述的 TOFU 信任流程。
+
+## 工程结构与构建
+
+- `:core`：纯 Java 传输、帧编解码、Noise XX、流控、重传、Pacer 与拥塞控制；包含确定性模拟链路、UDP loopback 和 Netty 集成测试。
+- `:mod-common`：配置、身份信任、跨端 Mixin 与通用适配逻辑。
+- `:neoforge`：NeoForge 平台入口、GUI、F3 状态与指令。
+
+使用 JDK 21 构建：
 
 ```bash
 ./gradlew :core:test :mod-common:test :neoforge:jar
 ```
 
-构建生成的 Mod Jar 位于：
+产物路径：
 
 ```text
 neoforge/build/libs/hyperconduit-neoforge-0.1.0.jar
 ```
+
+## 参考项目
+
+HyperConduit 没有将下列项目作为运行时库引入，也不与其协议直接互通；这里记录的是本项目在自行实现时参考的公开设计与算法来源。
+
+- [Hysteria 2](https://github.com/HyNetworks/hysteria)
+  - 参考其 **Brutal** 拥塞控制思路与公式：按配置目标速率，以近期 ACK / Loss 比例计算有界丢包补偿；
+  - 参考其 `internal/congestion/common/pacer.go` 的令牌桶 Pacer 设计：发包预算、最小起搏延迟与突发额度限制；
+  - HyperConduit 将这些设计以 Java 21 重写为 `BrutalCc` 与 `Pacer`，并针对单 Minecraft 字节流会话接入自己的可靠 UDP 状态机。
+
+- [quic-go](https://github.com/HyNetworks/quic-go)
+  - 参考其 QUIC 传输层的参数与可靠性设计：初始数据报尺寸、ACK 区间表示、平滑 RTT / ACK delay 处理、基于包号及时间阈值的丢包检测、PTO 探测与 Pacer 行为；
+  - HyperConduit 使用自定义 packet、frame 与握手格式实现这些机制，只保留 Minecraft 所需的单有序字节流；不实现 RFC 9000 wire format、多流复用、HTTP/3 或标准 QUIC 互操作。
