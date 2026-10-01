@@ -383,6 +383,24 @@ class SessionEngineTest {
     }
 
     @Test
+    void recentRatesSpanSecondBoundaries() {
+        RollingMetricsTracker tracker = new RollingMetricsTracker(900 * MS);
+        tracker.sent(900 * MS, 140);
+        tracker.received(950 * MS, 70);
+        tracker.retransmitted(950 * MS);
+
+        RollingMetrics afterSecondBoundary = tracker.snapshot(SECOND + 50 * MS);
+        assertEquals(140, afterSecondBoundary.txBytesPerSecond());
+        assertEquals(70, afterSecondBoundary.rxBytesPerSecond());
+        assertEquals(1, afterSecondBoundary.retransmitsPerSecond());
+
+        RollingMetrics afterWindowExpires = tracker.snapshot(2 * SECOND);
+        assertEquals(0, afterWindowExpires.txBytesPerSecond());
+        assertEquals(0, afterWindowExpires.rxBytesPerSecond());
+        assertEquals(0, afterWindowExpires.retransmitsPerSecond());
+    }
+
+    @Test
     void idleSessionGoesQuiet() {
         SimulatedLink link = link();
         assertTrue(link.runUntil(link::bothEstablished, 2 * SECOND));

@@ -10,9 +10,12 @@ final class RollingMetricsTracker {
 
     private static final long SECOND_NANOS = 1_000_000_000L;
     private static final int BUCKET_COUNT = 10;
+    private static final long RATE_BUCKET_NANOS = 100_000_000L;
+    private static final int RATE_BUCKET_COUNT = (int) (SECOND_NANOS / RATE_BUCKET_NANOS);
     private static final int MAX_RTT_SAMPLES = 256;
 
     private final Bucket[] buckets = new Bucket[BUCKET_COUNT];
+    private final RateBucket[] rateBuckets = new RateBucket[RATE_BUCKET_COUNT];
     private final ArrayDeque<RttSample> rttSamples = new ArrayDeque<>();
     private long lastRttNanos = -1;
     private long jitterSum;
@@ -23,13 +26,29 @@ final class RollingMetricsTracker {
         for (int i = 0; i < buckets.length; i++) {
             buckets[i] = new Bucket(second - i);
         }
+        long rateBucket = nowNanos / RATE_BUCKET_NANOS;
+        for (int i = 0; i < rateBuckets.length; i++) {
+            rateBuckets[i] = new RateBucket(rateBucket - i);
+        }
     }
 
-    void sent(long nowNanos, long bytes) { bucket(nowNanos).txBytes += bytes; }
-    void received(long nowNanos, long bytes) { bucket(nowNanos).rxBytes += bytes; }
+    void sent(long nowNanos, long bytes) {
+        bucket(nowNanos).txBytes += bytes;
+        rateBucket(nowNanos).txBytes += bytes;
+    }
+
+    void received(long nowNanos, long bytes) {
+        bucket(nowNanos).rxBytes += bytes;
+        rateBucket(nowNanos).rxBytes += bytes;
+    }
+
     void acknowledged(long nowNanos) { bucket(nowNanos).acknowledgedPackets++; }
     void lost(long nowNanos) { bucket(nowNanos).lostPackets++; }
-    void retransmitted(long nowNanos) { bucket(nowNanos).retransmittedPackets++; }
+
+    void retransmitted(long nowNanos) {
+        bucket(nowNanos).retransmittedPackets++;
+        rateBucket(nowNanos).retransmittedPackets++;
+    }
 
     void rttSample(long nowNanos, long rttNanos) {
         if (rttNanos <= 0) return;
@@ -50,11 +69,18 @@ final class RollingMetricsTracker {
             acknowledged += bucket.acknowledgedPackets;
             lost += bucket.lostPackets;
         }
-        long currentSecond = nowNanos / SECOND_NANOS;
-        Bucket current = buckets[(int) Math.floorMod(currentSecond, BUCKET_COUNT)];
-        long tx = current.second == currentSecond ? current.txBytes : 0;
-        long rx = current.second == currentSecond ? current.rxBytes : 0;
-        long retransmitted = current.second == currentSecond ? current.retransmittedPackets : 0;
+        long tx = 0;
+        long rx = 0;
+        long retransmitted = 0;
+        long currentRateBucket = nowNanos / RATE_BUCKET_NANOS;
+        for (RateBucket bucket : rateBuckets) {
+            if (currentRateBucket - bucket.index >= RATE_BUCKET_COUNT) {
+                continue;
+            }
+            tx += bucket.txBytes;
+            rx += bucket.rxBytes;
+            retransmitted += bucket.retransmittedPackets;
+        }
         long[] samples = rttSamples.stream().mapToLong(RttSample::rttNanos).toArray();
         long p95 = 0;
         if (samples.length > 0) {
@@ -73,6 +99,16 @@ final class RollingMetricsTracker {
         Bucket bucket = buckets[index];
         if (bucket.second != second) {
             bucket.reset(second);
+        }
+        return bucket;
+    }
+
+    private RateBucket rateBucket(long nowNanos) {
+        long index = nowNanos / RATE_BUCKET_NANOS;
+        int slot = (int) Math.floorMod(index, RATE_BUCKET_COUNT);
+        RateBucket bucket = rateBuckets[slot];
+        if (bucket.index != index) {
+            bucket.reset(index);
         }
         return bucket;
     }
@@ -98,6 +134,16 @@ final class RollingMetricsTracker {
         void reset(long second) {
             this.second = second;
             txBytes = rxBytes = acknowledgedPackets = lostPackets = retransmittedPackets = 0;
+        }
+    }
+
+    private static final class RateBucket {
+        long index;
+        long txBytes, rxBytes, retransmittedPackets;
+        RateBucket(long index) { this.index = index; }
+        void reset(long index) {
+            this.index = index;
+            txBytes = rxBytes = retransmittedPackets = 0;
         }
     }
 
