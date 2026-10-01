@@ -1,11 +1,11 @@
 # HyperConduit
 
-HyperConduit 是 Minecraft 1.21.1 NeoForge 的双端可靠 UDP 隧道模组。它保持 Minecraft 原有协议、登录、认证、白名单和封禁逻辑不变，只替换底层传输通道。
+HyperConduit 是 Minecraft 1.21.1 NeoForge 的 QUIC-like + Brutal-like 隧道模组。它保持 Minecraft 原有协议、登录、认证、白名单和封禁逻辑不变，只替换底层传输通道。
 
 ## 当前状态
 
 - Minecraft 1.21.1 / NeoForge 21.1.252 / Java 21。
-- 客户端与服务端均安装模组后，可将 Minecraft 字节流放入加密可靠 UDP 隧道。
+- 客户端与服务端均安装模组后，可将 Minecraft 字节流放入加密的 QUIC-like 可靠 UDP 隧道。
 - 默认允许原版 TCP 与 HyperConduit 同端口共存；可在主机设置中禁止原版 TCP。
 - Fabric 尚未实现。
 
