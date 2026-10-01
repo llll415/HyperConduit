@@ -15,14 +15,20 @@ import net.minecraft.server.level.ServerPlayer;
 import net.neoforged.bus.api.SubscribeEvent;
 import net.neoforged.neoforge.event.RegisterCommandsEvent;
 import net.neoforged.neoforge.event.server.ServerStoppingEvent;
+import net.neoforged.neoforge.event.tick.ServerTickEvent;
 import net.neoforged.fml.common.EventBusSubscriber;
 
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 
 @EventBusSubscriber(modid = "hyperconduit")
 public final class HyperConduitServerEvents {
+
+    private static final Set<net.minecraft.commands.CommandSourceStack> WATCHERS = ConcurrentHashMap.newKeySet();
+    private static int watchTicks;
 
     private HyperConduitServerEvents() {
     }
@@ -34,12 +40,29 @@ public final class HyperConduitServerEvents {
 
     @SubscribeEvent
     public static void registerCommands(RegisterCommandsEvent event) {
-        event.getDispatcher().register(Commands.literal("hc")
-                .then(Commands.literal("status").executes(context -> sendStatus(context.getSource().getServer(),
-                        context.getSource()))));
         event.getDispatcher().register(Commands.literal("hyperconduit")
                 .then(Commands.literal("status").executes(context -> sendStatus(context.getSource().getServer(),
-                        context.getSource()))));
+                        context.getSource())))
+                .then(Commands.literal("watch").executes(context -> {
+                    WATCHERS.add(context.getSource());
+                    context.getSource().sendSuccess(() -> Component.literal(
+                            "[HyperConduit] 已开始每秒输出实时状态；使用 /hyperconduit watch stop 停止。"), false);
+                    return Command.SINGLE_SUCCESS;
+                }).then(Commands.literal("stop").executes(context -> {
+                    WATCHERS.remove(context.getSource());
+                    context.getSource().sendSuccess(() -> Component.literal("[HyperConduit] 已停止实时状态输出。"), false);
+                    return Command.SINGLE_SUCCESS;
+                }))));
+    }
+
+    @SubscribeEvent
+    public static void updateWatchers(ServerTickEvent.Post event) {
+        if (++watchTicks < 20 || WATCHERS.isEmpty()) return;
+        watchTicks = 0;
+        List<String> lines = statusLines(event.getServer());
+        for (net.minecraft.commands.CommandSourceStack watcher : WATCHERS) {
+            for (String line : lines) watcher.sendSuccess(() -> Component.literal(line), false);
+        }
     }
 
     private static int sendStatus(MinecraftServer server, net.minecraft.commands.CommandSourceStack source) {
@@ -74,10 +97,11 @@ public final class HyperConduitServerEvents {
             txRate += recent.txBytesPerSecond();
             rxRate += recent.rxBytesPerSecond();
             retransRate += recent.retransmitsPerSecond();
-            lines.add("[HyperConduit] " + player.getGameProfile().getName()
-                    + " | RTT " + ms(stats.smoothedRttNanos()) + "ms p95(10s) " + ms(recent.p95RttNanos())
-                    + "ms | loss(10s) " + percent(recent.lossRate()) + " | 实时重传 " + recent.retransmitsPerSecond()
-                    + "/s | 实时 ↓ " + rate(recent.txBytesPerSecond()) + " ↑ " + rate(recent.rxBytesPerSecond()));
+            lines.add("§b[HyperConduit]§r §f[" + player.getGameProfile().getName() + "]§r §7[UDP隧道]§r"
+                    + " §fRTT §b" + ms(stats.smoothedRttNanos()) + "ms§r §7p95(10s) §f"
+                    + ms(recent.p95RttNanos()) + "ms§r " + lossTag(recent.lossRate()) + " "
+                    + retransTag(recent.retransmitsPerSecond()) + " §a↓ " + rate(recent.txBytesPerSecond())
+                    + "§r §b↑ " + rate(recent.rxBytesPerSecond()) + "§r");
         }
         lines.add("[HyperConduit] 总计 | 隧道 " + tunnels + " | 原版TCP " + vanilla + " | 本地 " + local
                 + " | 实时 ↓ " + rate(txRate) + " ↑ " + rate(rxRate)
@@ -92,6 +116,13 @@ public final class HyperConduitServerEvents {
     }
 
     private static long ms(long nanos) { return nanos / 1_000_000; }
+    private static String lossTag(double lossRate) {
+        return (lossRate >= 0.025 ? "§c" : "§8") + "丢包(10s) " + percent(lossRate) + "§r";
+    }
+    private static String retransTag(double retransmitsPerSecond) {
+        return (retransmitsPerSecond > 0 ? "§e" : "§8") + "重传 "
+                + String.format(Locale.ROOT, "%.1f/s", retransmitsPerSecond) + "§r";
+    }
     private static String percent(double value) { return String.format(Locale.ROOT, "%.1f%%", value * 100); }
     private static String rate(long bytesPerSecond) { return bytes(bytesPerSecond) + "/s"; }
     private static String bytes(long value) {

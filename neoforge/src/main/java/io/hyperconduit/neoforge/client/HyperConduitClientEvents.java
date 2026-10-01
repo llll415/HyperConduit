@@ -21,7 +21,6 @@ import net.neoforged.neoforge.client.event.ClientPlayerNetworkEvent;
 import net.neoforged.neoforge.client.event.CustomizeGuiOverlayEvent;
 import net.neoforged.neoforge.client.event.RegisterClientCommandsEvent;
 import net.neoforged.neoforge.client.event.ScreenEvent;
-import net.neoforged.neoforge.common.NeoForge;
 import net.neoforged.fml.common.EventBusSubscriber;
 
 import java.util.Locale;
@@ -60,26 +59,16 @@ public final class HyperConduitClientEvents {
             event.getLeft().add("[HyperConduit] " + state);
             return;
         }
-        SessionStats stats = channel.engine().stats();
-        RollingMetrics recent = stats.recent();
-        event.getLeft().add("[HyperConduit] 已连接 | RTT " + millis(stats.smoothedRttNanos())
-                + "ms p95(10s) " + millis(recent.p95RttNanos()) + "ms | loss(10s) " + percent(recent.lossRate())
-                + " | 实时重传 " + recent.retransmitsPerSecond() + "/s");
-        event.getLeft().add("[HyperConduit] " + (config != null && config.brutal ? "Brutal " : "Paced ")
-                + (config == null ? "?" : config.mbps) + " Mbps | 实时 ↓ " + rate(recent.rxBytesPerSecond())
-                + " ↑ " + rate(recent.txBytesPerSecond()) + " | jitter(10s) " + millis(recent.jitterNanos()) + "ms");
+        event.getLeft().addAll(clientStatusLines(channel, config));
     }
 
     @SubscribeEvent
     public static void registerClientCommands(RegisterClientCommandsEvent event) {
-        event.getDispatcher().register(Commands.literal("hc")
-                .then(Commands.literal("status").executes(context -> {
-                    context.getSource().sendSuccess(() -> Component.literal(statusText()), false);
-                    return Command.SINGLE_SUCCESS;
-                })));
         event.getDispatcher().register(Commands.literal("hyperconduit")
                 .then(Commands.literal("status").executes(context -> {
-                    context.getSource().sendSuccess(() -> Component.literal(statusText()), false);
+                    for (String line : clientStatusLines(activeTunnel(), ConfigHolder.get())) {
+                        context.getSource().sendSuccess(() -> Component.literal(line), false);
+                    }
                     return Command.SINGLE_SUCCESS;
                 })));
     }
@@ -97,20 +86,23 @@ public final class HyperConduitClientEvents {
         }
     }
 
-    static String statusText() {
-        HyperConduitChannel channel = activeTunnel();
-        HyperConduitConfig config = ConfigHolder.get();
+    static java.util.List<String> clientStatusLines(HyperConduitChannel channel, HyperConduitConfig config) {
         if (channel == null) {
-            return "[HyperConduit] " + (config != null && config.enabled
-                    ? "已启用，但当前连接未使用隧道" : "已禁用");
+            return java.util.List.of("§b[HyperConduit]§r " + (config != null && config.enabled
+                    ? "§e[已启用]§r 当前连接未使用隧道" : "§8[已禁用]§r"));
         }
         SessionStats stats = channel.engine().stats();
         RollingMetrics recent = stats.recent();
-        return "[HyperConduit] 已连接 | RTT=" + millis(stats.smoothedRttNanos()) + "ms"
-                + " p95(10s)=" + millis(recent.p95RttNanos()) + "ms | loss(10s)=" + percent(recent.lossRate())
-                + " | 实时重传=" + recent.retransmitsPerSecond() + "/s | 实时 ↓="
-                + rate(recent.rxBytesPerSecond()) + " ↑=" + rate(recent.txBytesPerSecond())
-                + " | total recv=" + bytes(stats.bytesReceived()) + " send=" + bytes(stats.bytesSent());
+        String controller = config != null && config.brutal ? "Brutal" : "Paced";
+        int rate = config == null ? 0 : config.mbps;
+        return java.util.List.of(
+                "§b[HyperConduit]§r §a[运行中]§r §e[" + controller + " " + rate + " Mbps]§r §7[UDP隧道]§r",
+                "§f[链路]§r RTT §b" + millis(stats.smoothedRttNanos()) + "ms§r  §7p95(10s) §f"
+                        + millis(recent.p95RttNanos()) + "ms§r  " + lossTag(recent.lossRate()) + "  "
+                        + retransTag(recent.retransmitsPerSecond()),
+                "§f[速率]§r §a↓ " + rate(recent.rxBytesPerSecond()) + "§r  §b↑ "
+                        + rate(recent.txBytesPerSecond()) + "§r  §7抖动(10s) "
+                        + millis(recent.jitterNanos()) + "ms§r");
     }
 
     private static HyperConduitChannel activeTunnel() {
@@ -124,6 +116,16 @@ public final class HyperConduitClientEvents {
 
     private static long millis(long nanos) {
         return nanos / 1_000_000;
+    }
+
+    private static String lossTag(double lossRate) {
+        String color = lossRate >= 0.025 ? "§c" : "§8";
+        return color + "丢包(10s) " + percent(lossRate) + "§r";
+    }
+
+    private static String retransTag(double retransmitsPerSecond) {
+        String color = retransmitsPerSecond > 0 ? "§e" : "§8";
+        return color + "重传 " + String.format(Locale.ROOT, "%.1f/s", retransmitsPerSecond) + "§r";
     }
 
     private static String percent(double value) {
