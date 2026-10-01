@@ -4,7 +4,7 @@ license="MIT"
 
 [[mods]]
     modId="hyperconduit"
-    version="0.1.0"
+    version="0.1.1"
     displayName="HyperConduit"
     description="Userspace reliable-UDP tunnel with Brutal congestion control for Minecraft connections"
 

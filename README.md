@@ -23,7 +23,7 @@ HyperConduit 是面向 **Minecraft 1.21.1 NeoForge** 的双端 UDP 隧道 Mod。
 
 ## 安装与使用
 
-1. 客户端与服务端安装相同版本的 `hyperconduit-neoforge-0.1.0.jar`。
+1. 客户端与服务端安装相同版本的 `hyperconduit-neoforge-0.1.1.jar`。
 2. 启动游戏后，在**多人游戏**或**开放局域网联机**界面点击 `HyperConduit…`。
 3. 打开“启用”，设置本端发送带宽与控制模式；默认是 `10 Mbps + Brutal`。
 4. 玩家仍像原版一样填写服务器 IP 和端口加入。无需额外部署代理或填写密钥。
@@ -213,7 +213,7 @@ Noise XX 完成后为两个方向派生独立传输密钥；客户端会在发�
 产物路径：
 
 ```text
-neoforge/build/libs/hyperconduit-neoforge-0.1.0.jar
+neoforge/build/libs/hyperconduit-neoforge-x.x.x.jar
 ```
 
 ## 参考项目
