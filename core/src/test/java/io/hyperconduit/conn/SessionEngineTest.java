@@ -383,21 +383,31 @@ class SessionEngineTest {
     }
 
     @Test
-    void recentRatesSpanSecondBoundaries() {
+    void recentMetricsUseRealtimeRatesAndTenSecondQualityWindows() {
         RollingMetricsTracker tracker = new RollingMetricsTracker(900 * MS);
         tracker.sent(900 * MS, 140);
         tracker.received(950 * MS, 70);
         tracker.retransmitted(950 * MS);
+        tracker.acknowledged(950 * MS, 3);
+        tracker.lost(950 * MS, 1);
+        tracker.rttSample(900 * MS, 10 * MS);
+        tracker.rttSample(950 * MS, 30 * MS);
 
         RollingMetrics afterSecondBoundary = tracker.snapshot(SECOND + 50 * MS);
-        assertEquals(140, afterSecondBoundary.txBytesPerSecond());
-        assertEquals(70, afterSecondBoundary.rxBytesPerSecond());
-        assertEquals(1, afterSecondBoundary.retransmitsPerSecond());
+        assertTrue(afterSecondBoundary.txBytesPerSecond() > 0, "real-time send rate must span a second boundary");
+        assertTrue(afterSecondBoundary.rxBytesPerSecond() > 0, "real-time receive rate must span a second boundary");
+        assertTrue(afterSecondBoundary.retransmitsPerSecond() > 0, "real-time retransmit rate must span a second boundary");
+        assertEquals(0.25, afterSecondBoundary.lossRate());
+        assertEquals(30 * MS, afterSecondBoundary.p95RttNanos());
+        assertEquals(20 * MS, afterSecondBoundary.jitterNanos());
 
-        RollingMetrics afterWindowExpires = tracker.snapshot(2 * SECOND);
-        assertEquals(0, afterWindowExpires.txBytesPerSecond());
-        assertEquals(0, afterWindowExpires.rxBytesPerSecond());
-        assertEquals(0, afterWindowExpires.retransmitsPerSecond());
+        RollingMetrics afterRatesDecay = tracker.snapshot(11 * SECOND);
+        assertEquals(0, afterRatesDecay.txBytesPerSecond());
+        assertEquals(0, afterRatesDecay.rxBytesPerSecond());
+        assertEquals(0, afterRatesDecay.retransmitsPerSecond());
+        assertEquals(0, afterRatesDecay.lossRate());
+        assertEquals(0, afterRatesDecay.p95RttNanos());
+        assertEquals(0, afterRatesDecay.jitterNanos());
     }
 
     @Test

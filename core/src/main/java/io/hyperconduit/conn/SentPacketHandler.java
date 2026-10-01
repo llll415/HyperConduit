@@ -70,8 +70,13 @@ public final class SentPacketHandler {
     private int ptoCount;
     private int probesToSend;
     private long lostPackets;
+    private int recentAcknowledgedPackets;
+    private int recentLostPackets;
     private long alarmNanos;
     private boolean hasAlarm;
+
+    public record PacketEvents(int acknowledgedPackets, int lostPackets) {
+    }
 
     public SentPacketHandler(CongestionController cc, RttStats rttStats) {
         this.cc = cc;
@@ -106,6 +111,14 @@ public final class SentPacketHandler {
     /** Total packets this side has declared lost over the life of the session. */
     public long lostPackets() {
         return lostPackets;
+    }
+
+    /** Returns and clears newly ACKed and newly declared-lost ack-eliciting packets. */
+    public PacketEvents takeRecentPacketEvents() {
+        PacketEvents events = new PacketEvents(recentAcknowledgedPackets, recentLostPackets);
+        recentAcknowledgedPackets = 0;
+        recentLostPackets = 0;
+        return events;
     }
 
     public long congestionWindow() {
@@ -200,6 +213,7 @@ public final class SentPacketHandler {
             }
             removeFromBytesInFlight(packet);
         }
+        recentAcknowledgedPackets += ackedInfo.size();
         ackedPackets.clear();
 
         if (!ackedInfo.isEmpty() || !lostInfo.isEmpty()) {
@@ -362,6 +376,7 @@ public final class SentPacketHandler {
                 continue;
             }
             lostPackets++;
+            recentLostPackets++;
             removeFromBytesInFlight(packet);
             queueFramesForRetransmission(packet);
             lostInfo.add(new LostPacket(packet.packetNumber, packet.length));

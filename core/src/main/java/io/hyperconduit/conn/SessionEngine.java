@@ -552,7 +552,7 @@ public final class SessionEngine {
                 case Frame.Ack ack -> {
                     try {
                         if (sentPackets.receivedAck(ack, now)) {
-                            rollingMetrics.acknowledged(now);
+                            recordPacketEvents(now);
                             if (rttStats.hasMeasurement()) {
                                 rollingMetrics.rttSample(now, rttStats.latestRttNanos());
                             }
@@ -741,12 +741,19 @@ public final class SessionEngine {
      * send path. Without it, a packet whose ACK never arrives is neither declared lost nor probed,
      * and the session freezes with bytes permanently in flight.
      */
+    private void recordPacketEvents(long now) {
+        SentPacketHandler.PacketEvents events = sentPackets.takeRecentPacketEvents();
+        rollingMetrics.acknowledged(now, events.acknowledgedPackets());
+        rollingMetrics.lost(now, events.lostPackets());
+    }
+
     private void runDueTimers(long now) {
         if (sendCodec == null || !sentPackets.hasAlarm()) {
             return;
         }
         if (now >= sentPackets.alarmNanos()) {
             sentPackets.onLossDetectionTimeout(now);
+            recordPacketEvents(now);
         }
     }
 
