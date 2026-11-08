@@ -11,6 +11,7 @@ import (
 	"github.com/apernet/hysteria/core/v2/client"
 	coreErrs "github.com/apernet/hysteria/core/v2/errors"
 	"github.com/apernet/hysteria/core/v2/internal/integration_tests/mocks"
+	"github.com/apernet/hysteria/core/v2/observe"
 	"github.com/apernet/hysteria/core/v2/server"
 )
 
@@ -214,6 +215,7 @@ func TestClientServerHandshakeInfo(t *testing.T) {
 	assert.Equal(t, &client.HandshakeInfo{
 		UDPEnabled: true,
 		Tx:         123456,
+		Congestion: observe.Congestion{Type: "brutal", TxBytesPerSecond: 123456},
 		ServerAddr: udpAddr,
 	}, info)
 
@@ -249,6 +251,7 @@ func TestClientServerHandshakeInfo(t *testing.T) {
 	assert.Equal(t, &client.HandshakeInfo{
 		UDPEnabled: false,
 		Tx:         100000,
+		Congestion: observe.Congestion{Type: "brutal", TxBytesPerSecond: 100000},
 		ServerAddr: udpAddr,
 	}, info)
 
@@ -281,6 +284,7 @@ func TestClientServerHandshakeInfo(t *testing.T) {
 	assert.Equal(t, &client.HandshakeInfo{
 		UDPEnabled: true,
 		Tx:         0,
+		Congestion: observe.Congestion{Type: "bbr"},
 		ServerAddr: udpAddr,
 	}, info)
 

@@ -35,6 +35,12 @@
 - 未修改 QUIC 依赖、拥塞算法、HTTP/3 鉴权字段和 TCP framing。
 - 应用 UDP、嗅探、伪装及 Chrome 相关源码尚未删除；专用入口禁用这些能力，后续再裁剪。
 - 调用方 module 位于 `sidecar/`，通过本地 `replace` 使用本目录；`v2.0.0` 仅是满足 module 主版本的 require 标记，实际源码始终来自本地固定快照及定制补丁。
+- 第 3 步（2026-11-09）：
+  - 新增 `observe` 包：本地连接 ID、发送控制器、QUIC 指标快照和 stream 上下文，不包含凭据。
+  - `client/client.go`：握手结果补实际发送控制器，暴露 `ConnectionStats` 与 stream 身份。
+  - `server/config.go`、`server/server.go`：增加连接/错误观察回调与可选 `ContextOutbound`，传递真实 QUIC 对端和 stream ID，后端拨号支持请求取消。
+  - `errors/errors.go`：增加类型化 admission limit 错误，避免按文本猜测原因。
+  - 未修改带宽协议或拥塞算法；保留 `TrafficLogger` 和原有事件接口。两端 ID 仅在各自进程内有效，不要求相同。
 
 ## 测试基线
 
@@ -67,3 +73,10 @@ git rev-parse 832a525:sidecar/hy2-core
 - 两个 module 的 `go vet` 通过；sidecar `go mod verify` 和 `CGO_ENABLED=0` CLI 构建通过。
 - JSON 测试报告位于本机临时目录 `opencode/hyperconduit-{sidecar,core}-step2-tests.jsonl`，不随源码分发。
 - 未运行 race detector：本机无 C 编译器且 CGO 关闭；未验证 Minecraft 或其他操作系统。
+
+## 第 3 步验证
+
+- Windows amd64 / Go 1.26.4：sidecar 3 个测试包、200 个测试/子测试通过；core 8 包、141 个通过；0 跳过、0 失败。
+- 14 组双向协商、单连接带宽隔离、stream 关联、并发状态读取、错误计数与取消回归通过；sidecar 及核心上下文用例重复 5 次通过。
+- 两个 module 的 `go vet`、依赖校验及无 CGO CLI 构建通过。报告：本机临时目录 `opencode/hyperconduit-{sidecar,core}-step3-tests.jsonl`。
+- 未运行 race detector，未验证 MC 接入、公网性能或其他平台。

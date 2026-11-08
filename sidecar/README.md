@@ -1,6 +1,6 @@
 # HyperConduit Go sidecar
 
-第 2 步 runtime 已完成：独立 Go 隧道可运行，尚未接入 Minecraft/Java 端。当前是固定目标隧道，不是通用代理；不提供任意目标选择、UDP 或直接 TCP 回退。
+独立 Go 隧道可运行，尚未接入 Minecraft/Java。仅转发服务端配置的目标，不提供应用 UDP 转发或直接 TCP 回退。
 
 ## 目录
 
@@ -43,7 +43,7 @@ go test -count=1 -timeout=10m ./...
 {"version":1,"event":"ready","mode":"server","listen":"127.0.0.1:25565"}
 ```
 
-错误写 stderr；Ctrl+C 关闭进程。本机测试程序连接客户端输出的 `listen`，数据转发至服务端配置的目标。
+错误写 stderr，隧道错误包含 `code` 和 `op`，不输出底层敏感信息；Ctrl+C 关闭进程。本机测试程序连接客户端输出的 `listen`。
 
 ## 配置示例
 
@@ -89,6 +89,13 @@ go test -count=1 -timeout=10m ./...
 - 无直接 TCP fallback，断线后不自动重连。
 - 玩家来源地址、MC 连接关联和 F3 尚未接入。
 - 尚未接入 Java 模块；现有游戏行为未切换到此隧道。
+
+## 状态接口
+
+Go 调用方可通过 `Endpoint.Status()` 读取活动连接、TCP↔stream 关联和分类错误计数；未开放 HTTP 服务或额外管理端口。状态接口和 CLI 错误使用固定分类，不记录凭据或原始错误文本。
+每条 QUIC 连接只报告**本地发送控制器**，Brutal 速率为协商目标。RTT 单位为纳秒；收发计数属于 QUIC 层，包含重传等开销；丢包计数可能因迟到确认而下修。
+连接 ID 仅在本进程内有效，两端 ID 不必相同。`PeerAddr` 来自 QUIC 对端，不接受客户端声明，也尚未传递到 MC。
+`disableBrutal` 是协商策略，不是针对篡改客户端的流量管控；没有全服共享限速器。
 
 ## 来源
 

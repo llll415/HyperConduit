@@ -15,6 +15,7 @@ import (
 	"github.com/apernet/hysteria/core/v2/internal/congestion"
 	"github.com/apernet/hysteria/core/v2/internal/protocol"
 	"github.com/apernet/hysteria/core/v2/internal/utils"
+	"github.com/apernet/hysteria/core/v2/observe"
 
 	"github.com/apernet/quic-go"
 	"github.com/apernet/quic-go/http3"
@@ -46,6 +47,8 @@ type ContextClient interface {
 	// locally or by the remote peer. It can be used by the sidecar to tear
 	// down local listeners and exit instead of staying in a stale READY state.
 	Done() <-chan struct{}
+	ConnectionStats() observe.Snapshot
+	Observation() *observe.Connection
 }
 
 type HyUDPConn interface {
@@ -56,7 +59,8 @@ type HyUDPConn interface {
 
 type HandshakeInfo struct {
 	UDPEnabled  bool
-	Tx          uint64 // 0 if using BBR
+	Tx          uint64             // Local Brutal target; 0 when using BBR or Reno.
+	Congestion  observe.Congestion // Local sending controller, not the remote controller.
 	ServerAddr  net.Addr
 	ECHAccepted bool
 }
@@ -94,9 +98,10 @@ func NewClientContext(ctx context.Context, config *Config) (ContextClient, *Hand
 type clientImpl struct {
 	config *Config
 
-	pktConn net.PacketConn
-	tr      *quic.Transport
-	conn    *quic.Conn
+	pktConn     net.PacketConn
+	tr          *quic.Transport
+	conn        *quic.Conn
+	observation *observe.Connection
 
 	udpSM *udpSessionManager
 }
@@ -244,12 +249,18 @@ func (c *clientImpl) connect(ctx context.Context) (*HandshakeInfo, error) {
 	c.pktConn = pktConn
 	c.tr = tr
 	c.conn = qc
+	cc := observe.Congestion{Type: c.config.CongestionConfig.Type}
+	if actualTx > 0 {
+		cc = observe.Congestion{Type: "brutal", TxBytesPerSecond: actualTx}
+	}
+	c.observation = observe.New(qc, "client", cc)
 	if authResp.UDPEnabled {
 		c.udpSM = newUDPSessionManager(&udpIOImpl{Conn: qc})
 	}
 	return &HandshakeInfo{
 		UDPEnabled:  authResp.UDPEnabled,
 		Tx:          actualTx,
+		Congestion:  cc,
 		ServerAddr:  c.config.ServerAddr,
 		ECHAccepted: qc.ConnectionState().TLS.ECHAccepted,
 	}, nil
@@ -348,6 +359,7 @@ func (c *clientImpl) TCPContext(ctx context.Context, addr string) (net.Conn, err
 			PseudoLocalAddr:  c.conn.LocalAddr(),
 			PseudoRemoteAddr: c.conn.RemoteAddr(),
 			Established:      false,
+			Context:          c.streamContext(stream),
 		}, nil
 	}
 	// Read response
@@ -377,6 +389,7 @@ func (c *clientImpl) TCPContext(ctx context.Context, addr string) (net.Conn, err
 		PseudoLocalAddr:  c.conn.LocalAddr(),
 		PseudoRemoteAddr: c.conn.RemoteAddr(),
 		Established:      true,
+		Context:          c.streamContext(stream),
 	}, nil
 }
 
@@ -391,7 +404,24 @@ func (c *clientImpl) Close() error {
 	_ = c.conn.CloseWithError(closeErrCodeOK, "")
 	_ = c.tr.Close()
 	_ = c.pktConn.Close()
+	if c.observation != nil {
+		c.observation.Close()
+	}
 	return nil
+}
+
+func (c *clientImpl) ConnectionStats() observe.Snapshot {
+	return c.observation.Snapshot()
+}
+
+func (c *clientImpl) Observation() *observe.Connection { return c.observation }
+
+func (c *clientImpl) streamContext(stream *utils.QStream) observe.StreamContext {
+	var id uint64
+	if c.observation != nil {
+		id = c.observation.ID()
+	}
+	return observe.StreamContext{ConnectionID: id, StreamID: int64(stream.StreamID()), RemoteAddr: c.conn.RemoteAddr().String()}
 }
 
 // Done is closed when the underlying QUIC connection is closed, either by the
@@ -423,7 +453,16 @@ type tcpConn struct {
 	PseudoLocalAddr  net.Addr
 	PseudoRemoteAddr net.Addr
 	Established      bool
+	Context          observe.StreamContext
 }
+
+// StreamConnection associates a byte stream with its local QUIC connection.
+type StreamConnection interface {
+	net.Conn
+	StreamContext() observe.StreamContext
+}
+
+func (c *tcpConn) StreamContext() observe.StreamContext { return c.Context }
 
 func (c *tcpConn) Read(b []byte) (n int, err error) {
 	if !c.Established {

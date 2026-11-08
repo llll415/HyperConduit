@@ -5,7 +5,9 @@ import (
 	crand "crypto/rand"
 	"crypto/tls"
 	"errors"
+	"io"
 	"math/rand"
+	"net"
 	"net/http"
 	"sync"
 	"sync/atomic"
@@ -15,9 +17,11 @@ import (
 	"github.com/apernet/quic-go/http3"
 	"github.com/apernet/quic-go/quicvarint"
 
+	coreerrors "github.com/apernet/hysteria/core/v2/errors"
 	"github.com/apernet/hysteria/core/v2/internal/congestion"
 	"github.com/apernet/hysteria/core/v2/internal/protocol"
 	"github.com/apernet/hysteria/core/v2/internal/utils"
+	"github.com/apernet/hysteria/core/v2/observe"
 )
 
 const (
@@ -80,7 +84,10 @@ func NewServer(config *Config) (Server, error) {
 				context.AfterFunc(ctx, func() { <-slots })
 				return ctx, nil
 			default:
-				return nil, errors.New("connection limit reached")
+				if config.ErrorObserver != nil {
+					config.ErrorObserver(coreerrors.LimitError{})
+				}
+				return nil, coreerrors.LimitError{}
 			}
 		}
 	}
@@ -183,6 +190,9 @@ func (s *serverImpl) handleClient(conn *quic.Conn) {
 	if s.config.RequestTimeout > 0 {
 		handler.authTimer = time.AfterFunc(s.config.RequestTimeout, func() {
 			if !handler.authenticated.Load() {
+				if s.config.ErrorObserver != nil {
+					s.config.ErrorObserver(context.DeadlineExceeded)
+				}
 				_ = conn.CloseWithError(closeErrCodeOK, "authentication timed out")
 			}
 		})
@@ -199,6 +209,14 @@ func (s *serverImpl) handleClient(conn *quic.Conn) {
 	handler.closing = true
 	handler.streamMutex.Unlock()
 	handler.streams.Wait()
+	handler.authMutex.Lock()
+	defer handler.authMutex.Unlock()
+	if handler.observation != nil {
+		handler.observation.Close()
+		if observer := s.config.ConnectionObserver; observer != nil {
+			observer(handler.observation, false)
+		}
+	}
 	// If the client is authenticated, we need to log the disconnect event
 	if handler.authenticated.Load() {
 		if tl := s.config.TrafficLogger; tl != nil {
@@ -223,6 +241,7 @@ type h3sHandler struct {
 	streams       sync.WaitGroup
 	streamMutex   sync.Mutex
 	closing       bool
+	observation   *observe.Connection
 
 	udpSM *udpSessionManager // Only set after authentication
 }
@@ -239,6 +258,9 @@ func (h *h3sHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodPost && r.Host == protocol.URLHost && r.URL.Path == protocol.URLPath {
 		h.authMutex.Lock()
 		defer h.authMutex.Unlock()
+		if h.conn.Context().Err() != nil {
+			return
+		}
 		if h.authenticated.Load() {
 			// Already authenticated
 			protocol.AuthResponseToHeader(w.Header(), protocol.AuthResponse{
@@ -279,6 +301,14 @@ func (h *h3sHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				Rx:         h.config.BandwidthConfig.MaxRx,
 				RxAuto:     h.config.IgnoreClientBandwidth,
 			})
+			cc := observe.Congestion{Type: h.config.CongestionConfig.Type}
+			if actualTx > 0 {
+				cc = observe.Congestion{Type: "brutal", TxBytesPerSecond: actualTx}
+			}
+			h.observation = observe.New(h.conn, "server", cc)
+			if observer := h.config.ConnectionObserver; observer != nil {
+				observer(h.observation, true)
+			}
 			h.authenticated.Store(true)
 			if h.authTimer != nil {
 				h.authTimer.Stop()
@@ -358,6 +388,9 @@ func (h *h3sHandler) handleTCPRequest(stream *utils.QStream) {
 		ConnID:      h.connID,
 		InitialTime: time.Now(),
 	}
+	if h.observation != nil {
+		streamStats.ConnectionID = h.observation.ID()
+	}
 	streamStats.State.Store(StreamStateInitial)
 	streamStats.LastActiveTime.Store(time.Now())
 	defer func() {
@@ -371,6 +404,9 @@ func (h *h3sHandler) handleTCPRequest(stream *utils.QStream) {
 	// Read request
 	reqAddr, err := protocol.ReadTCPRequest(stream)
 	if err != nil {
+		if h.config.ErrorObserver != nil && h.conn.Context().Err() == nil && !errors.Is(err, io.EOF) && !errors.Is(err, context.Canceled) {
+			h.config.ErrorObserver(err)
+		}
 		_ = stream.Close()
 		return
 	}
@@ -400,7 +436,24 @@ func (h *h3sHandler) handleTCPRequest(stream *utils.QStream) {
 	}
 	// Dial target
 	streamStats.State.Store(StreamStateConnecting)
-	tConn, err := h.config.Outbound.TCP(reqAddr)
+	var tConn net.Conn
+	if outbound, ok := h.config.Outbound.(ContextOutbound); ok {
+		ctx := observe.WithStreamContext(h.conn.Context(), observe.StreamContext{
+			ConnectionID: streamStats.ConnectionID, StreamID: int64(stream.StreamID()), RemoteAddr: h.conn.RemoteAddr().String(),
+		})
+		ctx, cancel := context.WithCancel(ctx)
+		stop := context.AfterFunc(stream.Context(), cancel)
+		timeoutCancel := func() {}
+		if h.config.RequestTimeout > 0 {
+			ctx, timeoutCancel = context.WithTimeout(ctx, h.config.RequestTimeout)
+		}
+		tConn, err = outbound.TCPContext(ctx, reqAddr)
+		stop()
+		timeoutCancel()
+		cancel()
+	} else {
+		tConn, err = h.config.Outbound.TCP(reqAddr)
+	}
 	if err != nil {
 		if !hooked {
 			_ = protocol.WriteTCPResponse(stream, false, err.Error())

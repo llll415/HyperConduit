@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/apernet/hysteria/core/v2/observe"
 	"github.com/apernet/hysteria/core/v2/server"
 )
 
@@ -26,6 +27,19 @@ func (a tokenAuthenticator) Authenticate(_ net.Addr, token string, _ uint64) (bo
 	}
 	expected, actual := sha256.Sum256([]byte(a.expected)), sha256.Sum256([]byte(token))
 	return subtle.ConstantTimeCompare(expected[:], actual[:]) == 1, "minecraft"
+}
+
+type statusAuthenticator struct {
+	tokenAuthenticator
+	status *statusStore
+}
+
+func (a statusAuthenticator) Authenticate(addr net.Addr, token string, tx uint64) (bool, string) {
+	ok, id := a.tokenAuthenticator.Authenticate(addr, token, tx)
+	if !ok {
+		a.status.record(&Error{Code: CodeAuthentication, Op: "authenticate"})
+	}
+	return ok, id
 }
 
 // connSet bounds and owns established and pending backend/local connections.
@@ -103,27 +117,65 @@ type fixedOutbound struct {
 	target  string
 	timeout time.Duration
 	conns   *connSet
+	status  *statusStore
 }
 
 func (o *fixedOutbound) TCP(request string) (net.Conn, error) {
+	return o.TCPContext(o.ctx, request)
+}
+
+func (o *fixedOutbound) TCPContext(ctx context.Context, request string) (net.Conn, error) {
+	conn, err := o.dial(ctx, request)
+	if err != nil && o.status != nil {
+		o.status.record(err)
+	}
+	return conn, err
+}
+
+func (o *fixedOutbound) dial(ctx context.Context, request string) (net.Conn, error) {
 	if request != serviceAddress {
-		return nil, errTargetDenied
+		return nil, &Error{Code: CodeTarget, Op: "backend", Err: errTargetDenied}
 	}
 	if !o.conns.reserve() {
-		return nil, errors.New("Minecraft connection limit reached")
+		return nil, &Error{Code: CodeLimit, Op: "backend", Err: errors.New("connection limit")}
 	}
+	// Also stop pending dials when the endpoint (not just this stream) closes.
+	ctx, cancel := context.WithCancel(ctx)
+	stop := context.AfterFunc(o.ctx, cancel)
+	defer func() { stop(); cancel() }()
 	d := net.Dialer{Timeout: o.timeout, KeepAlive: 30 * time.Second}
-	c, err := d.DialContext(o.ctx, "tcp", o.target)
+	c, err := d.DialContext(ctx, "tcp", o.target)
 	if err != nil {
 		<-o.conns.limit
-		// Do not disclose private backend addresses in protocol responses.
-		return nil, errors.New("Minecraft backend unavailable")
+		if code := classifyCode(err); code == CodeTimeout || code == CodeCanceled {
+			return nil, classifyError("backend", err)
+		}
+		return nil, &Error{Code: CodeTarget, Op: "backend", Err: err}
 	}
 	owned, ok := o.conns.add(c)
 	if !ok {
 		return nil, net.ErrClosed
 	}
+	if o.status != nil {
+		id := o.status.addBinding(c.LocalAddr().String(), c.RemoteAddr().String())
+		if info, ok := observe.StreamFromContext(ctx); ok {
+			o.status.establish(id, info)
+		}
+		return &boundConn{Conn: owned, closed: func() { o.status.removeBinding(id) }}, nil
+	}
 	return owned, nil
+}
+
+type boundConn struct {
+	net.Conn
+	once   sync.Once
+	closed func()
+}
+
+func (c *boundConn) Close() error {
+	err := c.Conn.Close()
+	c.once.Do(c.closed)
+	return err
 }
 
 func (*fixedOutbound) UDP(string) (server.UDPConn, error) { return nil, errTargetDenied }

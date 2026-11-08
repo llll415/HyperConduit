@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"io"
@@ -13,6 +14,7 @@ import (
 	"github.com/apernet/hysteria/core/v2/internal/congestion"
 	"github.com/apernet/hysteria/core/v2/internal/pmtud"
 	"github.com/apernet/hysteria/core/v2/internal/utils"
+	"github.com/apernet/hysteria/core/v2/observe"
 	"github.com/apernet/quic-go"
 )
 
@@ -44,6 +46,11 @@ type Config struct {
 	// HyperConduit: optional transport admission and TCP request bounds.
 	MaxConnections int
 	RequestTimeout time.Duration
+	// ConnectionObserver is called synchronously at authenticated connect and
+	// disconnect. Implementations must be thread-safe, brief and non-blocking.
+	ConnectionObserver func(connection *observe.Connection, online bool)
+	// ErrorObserver reports local admission/request failures, not payload data.
+	ErrorObserver func(error)
 }
 
 // fill fills the fields that are not set by the user with default values when possible,
@@ -168,12 +175,18 @@ type RequestHook interface {
 // Outbound provides the implementation of how the server should connect to remote servers.
 // Although UDP includes a reqAddr, the implementation does not necessarily have to use it
 // to make a "connected" UDP connection that does not accept packets from other addresses.
-// In fact, the default implementation simply uses net.ListenUDP for a "full-cone" behavior.
 // CheckUDP is used to check if a UDP packet to reqAddr is permitted (useful for e.g. ACL).
 type Outbound interface {
 	TCP(reqAddr string) (net.Conn, error)
 	UDP(reqAddr string) (UDPConn, error)
 	CheckUDP(reqAddr string) error
+}
+
+// ContextOutbound optionally receives trusted connection/stream metadata and a
+// dial context, canceled when the QUIC stream closes or request timeout expires.
+// This does not replace Outbound: existing implementations remain usable.
+type ContextOutbound interface {
+	TCPContext(ctx context.Context, reqAddr string) (net.Conn, error)
 }
 
 // UDPConn is like net.PacketConn, but uses string for addresses.
@@ -271,9 +284,10 @@ func (s StreamState) String() string {
 type StreamStats struct {
 	State utils.Atomic[StreamState]
 
-	AuthID      string
-	ConnID      uint32
-	InitialTime time.Time
+	AuthID       string
+	ConnID       uint32
+	ConnectionID uint64 // Process-local observation ID; independent of legacy dump ConnID.
+	InitialTime  time.Time
 
 	ReqAddr       utils.Atomic[string]
 	HookedReqAddr utils.Atomic[string]

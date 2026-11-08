@@ -5,6 +5,11 @@ import (
 	"strconv"
 )
 
+// LimitError reports a local connection or stream admission limit.
+type LimitError struct{}
+
+func (LimitError) Error() string { return "connection limit reached" }
+
 // ConfigError is returned when a configuration field is invalid.
 type ConfigError struct {
 	Field  string

@@ -23,7 +23,17 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	if err := run(ctx, os.Args[1:], os.Stdout, os.Stderr); err != nil {
-		fmt.Fprintln(os.Stderr, "hyperconduit-tunnel:", err)
+		var classified *tunnel.Error
+		if errors.As(err, &classified) {
+			_ = json.NewEncoder(os.Stderr).Encode(struct {
+				Version int              `json:"version"`
+				Event   string           `json:"event"`
+				Code    tunnel.ErrorCode `json:"code"`
+				Op      string           `json:"op"`
+			}{1, "error", classified.Code, classified.Op})
+		} else {
+			fmt.Fprintln(os.Stderr, "hyperconduit-tunnel:", err)
+		}
 		os.Exit(1)
 	}
 }
