@@ -37,7 +37,7 @@ go list -deps -test -f '{{if .Module}}{{.Module.Path}}|{{.Module.Version}}{{end}
 
 ## 特别说明
 
-1. **上游基线未裁剪**：`sidecar/hy2-core` 是原样导入的上游源码基线（63 个文件未修改），保留了 UDP/QUIC、Chrome/uTLS 指纹（`utls`）、brotli 等上游功能。因此上表包含这些未裁剪功能所选择的依赖，**不代表最终 sidecar/runtime 的依赖清单**。后续若裁剪功能、调整构建标签或改变链接方式，应在二进制分发前重新生成并审计本清单。
+1. **依赖范围**：本清单建立于原样基线 `832a525`；第 2 步加入自有入口和 core 定制，未升级上表第三方模块。UDP、Chrome/uTLS、brotli 等相关依赖尚未裁剪，因此本清单**不代表最终二进制的依赖清单**。发布前须按实际入口和目标平台复核。
 2. **HY2 自身许可**：`sidecar/hy2-core/LICENSE.md` 为上游 MIT 许可原文，未复制到 `sidecar/licenses/`。本文件仅记录第三方依赖，不构成对 HyperConduit 用户项目整体的许可结论，也不构成任何泛化许可保证。
 3. **Go 标准库**：Go 运行时、标准库及标准库内 `vendor/golang.org/x/...` 副本随 Go 工具链分发，不属于上表模块；其许可为 Go 项目的 BSD-3-Clause。若分发编译后的二进制，应同时保留 Go 的版权与许可声明。
 4. **附加许可**：

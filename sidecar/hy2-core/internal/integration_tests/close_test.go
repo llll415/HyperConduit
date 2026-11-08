@@ -189,6 +189,7 @@ func TestClientServerClientShutdown(t *testing.T) {
 	s, err := server.NewServer(&server.Config{
 		TLSConfig:     serverTLSConfig(),
 		Conn:          udpConn,
+		Outbound:      testOutbound{},
 		Authenticator: auth,
 		EventLogger:   eventLogger,
 	})
@@ -220,6 +221,7 @@ func TestClientServerServerShutdown(t *testing.T) {
 	s, err := server.NewServer(&server.Config{
 		TLSConfig:     serverTLSConfig(),
 		Conn:          udpConn,
+		Outbound:      testOutbound{},
 		Authenticator: auth,
 	})
 	assert.NoError(t, err)

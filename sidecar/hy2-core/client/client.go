@@ -7,6 +7,8 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
+	"sync"
 	"time"
 
 	coreErrs "github.com/apernet/hysteria/core/v2/errors"
@@ -21,12 +23,29 @@ import (
 const (
 	closeErrCodeOK            = 0x100 // HTTP3 ErrCodeNoError
 	closeErrCodeProtocolError = 0x101 // HTTP3 ErrCodeGeneralProtocolError
+
+	// streamErrCodeCancel is used to reset a single stream whose dial context
+	// has been canceled. Resetting the stream does not affect the underlying
+	// QUIC connection, so other streams remain usable.
+	streamErrCodeCancel quic.StreamErrorCode = 0
 )
 
 type Client interface {
 	TCP(addr string) (net.Conn, error)
 	UDP() (HyUDPConn, error)
 	Close() error
+}
+
+// ContextClient is implemented by clients that support dialing with a context.
+// The context governs the dial operation only; once TCPContext returns a
+// connection, canceling the context no longer affects that connection.
+type ContextClient interface {
+	Client
+	TCPContext(ctx context.Context, addr string) (net.Conn, error)
+	// Done is closed when the underlying QUIC connection is closed, either
+	// locally or by the remote peer. It can be used by the sidecar to tear
+	// down local listeners and exit instead of staying in a stale READY state.
+	Done() <-chan struct{}
 }
 
 type HyUDPConn interface {
@@ -43,13 +62,29 @@ type HandshakeInfo struct {
 }
 
 func NewClient(config *Config) (Client, *HandshakeInfo, error) {
+	c, info, err := NewClientContext(context.Background(), config)
+	if err != nil {
+		return nil, nil, err
+	}
+	return c, info, nil
+}
+
+// NewClientContext creates a client and connects to the server, honoring ctx
+// for the connection handshake and authentication request. The context only
+// covers the connect phase; it does not control the lifetime of the returned
+// client or of connections created by TCPContext.
+func NewClientContext(ctx context.Context, config *Config) (ContextClient, *HandshakeInfo, error) {
+	if err := ctx.Err(); err != nil {
+		// Avoid creating a socket / transport for a context that is already done.
+		return nil, nil, coreErrs.ConnectError{Err: err}
+	}
 	if err := config.verifyAndFill(); err != nil {
 		return nil, nil, err
 	}
 	c := &clientImpl{
 		config: config,
 	}
-	info, err := c.connect()
+	info, err := c.connect(ctx)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -66,7 +101,9 @@ type clientImpl struct {
 	udpSM *udpSessionManager
 }
 
-func (c *clientImpl) connect() (*HandshakeInfo, error) {
+var _ ContextClient = (*clientImpl)(nil)
+
+func (c *clientImpl) connect(ctx context.Context) (*HandshakeInfo, error) {
 	pktConn, err := c.config.ConnFactory.New(c.config.ServerAddr)
 	if err != nil {
 		return nil, err
@@ -102,7 +139,17 @@ func (c *clientImpl) connect() (*HandshakeInfo, error) {
 		tr.ConnectionIDGenerator = quic.ZeroLengthConnectionIDGenerator{}
 	}
 	// Prepare RoundTripper
-	var conn *quic.Conn
+	// The dial goroutine may still be running when RoundTrip returns early due
+	// to ctx cancellation, so access to conn must be synchronized.
+	var (
+		connMu sync.Mutex
+		conn   *quic.Conn
+	)
+	getConn := func() *quic.Conn {
+		connMu.Lock()
+		defer connMu.Unlock()
+		return conn
+	}
 	rt := &http3.Transport{
 		TLSClientConfig: tlsConfig,
 		QUICConfig:      quicConfig,
@@ -111,9 +158,24 @@ func (c *clientImpl) connect() (*HandshakeInfo, error) {
 			if err != nil {
 				return nil, err
 			}
+			connMu.Lock()
 			conn = qc
+			connMu.Unlock()
 			return qc, nil
 		},
+	}
+	// rt is only used for the auth request and is deliberately never closed:
+	// on success its connection is the one handed out to the caller, and on
+	// failure tr.Close/pktConn.Close already tear down the transport.
+	// cleanup releases everything allocated for a failed connect attempt.
+	// It must never run after a successful connect, as that would tear down
+	// the live QUIC connection.
+	cleanup := func() {
+		if qc := getConn(); qc != nil {
+			_ = qc.CloseWithError(closeErrCodeProtocolError, "")
+		}
+		_ = tr.Close()
+		_ = pktConn.Close()
 	}
 	// Send auth HTTP request
 	req := &http.Request{
@@ -129,20 +191,33 @@ func (c *clientImpl) connect() (*HandshakeInfo, error) {
 		Auth: c.config.Auth,
 		Rx:   c.config.BandwidthConfig.MaxRx,
 	})
+	req = req.WithContext(ctx)
 	resp, err := rt.RoundTrip(req)
 	if err != nil {
-		if conn != nil {
-			_ = conn.CloseWithError(closeErrCodeProtocolError, "")
+		cleanup()
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, coreErrs.ConnectError{Err: ctxErr}
 		}
-		_ = tr.Close()
-		_ = pktConn.Close()
 		return nil, coreErrs.ConnectError{Err: err}
 	}
+	qc := getConn()
+	if qc == nil {
+		_ = resp.Body.Close()
+		cleanup()
+		return nil, coreErrs.ConnectError{Err: errors.New("no QUIC connection established")}
+	}
 	if resp.StatusCode != protocol.StatusAuthOK {
-		_ = conn.CloseWithError(closeErrCodeProtocolError, "")
-		_ = tr.Close()
-		_ = pktConn.Close()
+		_ = resp.Body.Close()
+		cleanup()
 		return nil, coreErrs.AuthError{StatusCode: resp.StatusCode}
+	}
+	_ = resp.Body.Close()
+	// The context only covers the connect phase. If it was canceled while we
+	// were finishing the handshake, discard the connection instead of handing
+	// out a client the caller has already given up on.
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		cleanup()
+		return nil, coreErrs.ConnectError{Err: ctxErr}
 	}
 	// Auth OK
 	authResp := protocol.AuthResponseFromHeader(resp.Header)
@@ -150,7 +225,7 @@ func (c *clientImpl) connect() (*HandshakeInfo, error) {
 	if authResp.RxAuto {
 		// Server asks client to use bandwidth detection,
 		// ignore local bandwidth config and use the configured congestion controller.
-		congestion.UseConfigured(conn, c.config.CongestionConfig.Type, c.config.CongestionConfig.BBRProfile)
+		congestion.UseConfigured(qc, c.config.CongestionConfig.Type, c.config.CongestionConfig.BBRProfile)
 	} else {
 		// actualTx = min(serverRx, clientTx)
 		actualTx = authResp.Rx
@@ -159,25 +234,24 @@ func (c *clientImpl) connect() (*HandshakeInfo, error) {
 			actualTx = c.config.BandwidthConfig.MaxTx
 		}
 		if actualTx > 0 {
-			congestion.UseBrutal(conn, actualTx, c.config.BandwidthConfig.DisableLossCompensation)
+			congestion.UseBrutal(qc, actualTx, c.config.BandwidthConfig.DisableLossCompensation)
 		} else {
 			// We don't know our own bandwidth either, use the configured congestion controller.
-			congestion.UseConfigured(conn, c.config.CongestionConfig.Type, c.config.CongestionConfig.BBRProfile)
+			congestion.UseConfigured(qc, c.config.CongestionConfig.Type, c.config.CongestionConfig.BBRProfile)
 		}
 	}
-	_ = resp.Body.Close()
 
 	c.pktConn = pktConn
 	c.tr = tr
-	c.conn = conn
+	c.conn = qc
 	if authResp.UDPEnabled {
-		c.udpSM = newUDPSessionManager(&udpIOImpl{Conn: conn})
+		c.udpSM = newUDPSessionManager(&udpIOImpl{Conn: qc})
 	}
 	return &HandshakeInfo{
 		UDPEnabled:  authResp.UDPEnabled,
 		Tx:          actualTx,
 		ServerAddr:  c.config.ServerAddr,
-		ECHAccepted: conn.ConnectionState().TLS.ECHAccepted,
+		ECHAccepted: qc.ConnectionState().TLS.ECHAccepted,
 	}, nil
 }
 
@@ -191,13 +265,73 @@ func (c *clientImpl) openStream() (*utils.QStream, error) {
 }
 
 func (c *clientImpl) TCP(addr string) (net.Conn, error) {
+	return c.TCPContext(context.Background(), addr)
+}
+
+// TCPContext opens a TCP proxy stream to addr, honoring ctx for the dial
+// operation. Canceling ctx resets only this stream; the underlying QUIC
+// connection is left open. Once this method returns successfully, ctx has no
+// further effect on the returned connection.
+func (c *clientImpl) TCPContext(ctx context.Context, addr string) (net.Conn, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	stream, err := c.openStream()
 	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, ctxErr
+		}
 		return nil, wrapIfConnectionClosed(err)
 	}
+
+	// Make blocking stream operations observe the context deadline even if
+	// the cancellation callback below has not run yet.
+	if deadline, ok := ctx.Deadline(); ok {
+		_ = stream.SetDeadline(deadline)
+	}
+
+	// Canceling the dial context resets only this stream. The QUIC connection
+	// and all other streams stay intact.
+	cancelDone := make(chan struct{})
+	stop := context.AfterFunc(ctx, func() {
+		defer close(cancelDone)
+		stream.CancelRead(streamErrCodeCancel)
+		stream.CancelWrite(streamErrCodeCancel)
+	})
+
+	// stopCancellation prevents the callback from touching the stream after
+	// this function returns. If the callback has already started, wait for it
+	// to finish. A non-nil result means the dial failed due to context
+	// cancellation and the stream must not be handed to the caller.
+	stopCancellation := func(dialErr error) error {
+		if !stop() {
+			<-cancelDone
+			_ = stream.Close()
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			return context.Canceled
+		}
+		if err := ctx.Err(); err != nil {
+			_ = stream.Close()
+			return err
+		}
+		// The stream deadline can fire slightly before the context's own timer
+		// is observed. Map that timeout back to the context error so callers
+		// can reliably use errors.Is(err, context.DeadlineExceeded).
+		if _, ok := ctx.Deadline(); ok && errors.Is(dialErr, os.ErrDeadlineExceeded) {
+			_ = stream.Close()
+			return context.DeadlineExceeded
+		}
+		return nil
+	}
+
 	// Send request
 	err = protocol.WriteTCPRequest(stream, addr)
 	if err != nil {
+		if ctxErr := stopCancellation(err); ctxErr != nil {
+			return nil, ctxErr
+		}
 		_ = stream.Close()
 		return nil, wrapIfConnectionClosed(err)
 	}
@@ -205,6 +339,10 @@ func (c *clientImpl) TCP(addr string) (net.Conn, error) {
 		// Don't wait for the response when fast open is enabled.
 		// Return the connection immediately, defer the response handling
 		// to the first Read() call.
+		if ctxErr := stopCancellation(nil); ctxErr != nil {
+			return nil, ctxErr
+		}
+		_ = stream.SetDeadline(time.Time{})
 		return &tcpConn{
 			Orig:             stream,
 			PseudoLocalAddr:  c.conn.LocalAddr(),
@@ -215,13 +353,25 @@ func (c *clientImpl) TCP(addr string) (net.Conn, error) {
 	// Read response
 	ok, msg, err := protocol.ReadTCPResponse(stream)
 	if err != nil {
+		if ctxErr := stopCancellation(err); ctxErr != nil {
+			return nil, ctxErr
+		}
 		_ = stream.Close()
 		return nil, wrapIfConnectionClosed(err)
 	}
 	if !ok {
+		if ctxErr := stopCancellation(nil); ctxErr != nil {
+			return nil, ctxErr
+		}
 		_ = stream.Close()
 		return nil, coreErrs.DialError{Message: msg}
 	}
+	if ctxErr := stopCancellation(nil); ctxErr != nil {
+		return nil, ctxErr
+	}
+	// The context controls only the dial. Clear its deadline so it does not
+	// leak into the lifetime of the returned connection.
+	_ = stream.SetDeadline(time.Time{})
 	return &tcpConn{
 		Orig:             stream,
 		PseudoLocalAddr:  c.conn.LocalAddr(),
@@ -242,6 +392,13 @@ func (c *clientImpl) Close() error {
 	_ = c.tr.Close()
 	_ = c.pktConn.Close()
 	return nil
+}
+
+// Done is closed when the underlying QUIC connection is closed, either by the
+// remote peer or by a call to Close. It lets the sidecar tear down local
+// listeners and exit instead of staying in a stale READY state.
+func (c *clientImpl) Done() <-chan struct{} {
+	return c.conn.Context().Done()
 }
 
 var nonPermanentErrors = []error{

@@ -49,7 +49,7 @@ func newStressClient(t *testing.T, timeout time.Duration) (client.Client, contex
 	auth := mocks.NewMockAuthenticator(t)
 	auth.EXPECT().Authenticate(mock.Anything, mock.Anything, mock.Anything).Return(true, "stress")
 	s, err := server.NewServer(&server.Config{
-		TLSConfig: serverTLSConfig(), Conn: pc, Authenticator: auth,
+		TLSConfig: serverTLSConfig(), Conn: pc, Outbound: testOutbound{}, Authenticator: auth,
 	})
 	require.NoError(t, err)
 	served := make(chan error, 1)

@@ -1,40 +1,95 @@
-# HyperConduit Go sidecar（源码基线阶段）
+# HyperConduit Go sidecar
 
-此目录将承载 HyperConduit 专用的 Go 隧道程序。目前仅导入了未经修改的 HY2 core，**没有可执行入口、没有 MC 接入，也没有完成固定目标或功能裁剪**。
+第 2 步 runtime 已完成：独立 Go 隧道可运行，尚未接入 Minecraft/Java 端。当前是固定目标隧道，不是通用代理；不提供任意目标选择、UDP 或直接 TCP 回退。
 
 ## 目录
 
-- `hy2-core/`：官方 core 的完整固定快照，包括许可证、测试、mock 和测试证书。
-- `UPSTREAM.md`：固定提交、内容校验、测试基线与后续改动记录。
-- `THIRD_PARTY_NOTICES.md`、`licenses/`：当前基线所用第三方依赖的许可记录。
+`cmd/hyperconduit-tunnel/` CLI；`internal/config/` 配置校验；`internal/tunnel/` 隧道与限制；`examples/` 示例。来源与许可见 [UPSTREAM.md](UPSTREAM.md)、[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
 
-没有导入 HY2 的 `app/`、`extras/`、上游 `go.work` 或 Git 元数据。
-导入源码内的 UDP、嗅探、伪装接口、浏览器指纹模仿等仍是上游原样实现；不代表这些功能已成为本项目产品能力。
+## 构建
 
-## 本地检查
-
-需要 Go 1.26.0 或更新的兼容工具链。在 PowerShell 中：
+需要 Go 1.26。PowerShell：
 
 ```powershell
-cd sidecar/hy2-core
+cd sidecar
 $env:GOWORK = 'off'
-go mod verify
+go build -trimpath -o build/hyperconduit-tunnel.exe ./cmd/hyperconduit-tunnel
+```
+
+`sidecar/build/` 已被 `.gitignore` 忽略，不要提交构建产物。
+
+## 测试
+
+`sidecar` 与 `sidecar/hy2-core` 是两个嵌套 module，需分别测试：
+
+```powershell
+cd sidecar
+$env:GOWORK = 'off'
 go test -count=1 -timeout=10m ./...
-go vet ./...
+cd hy2-core
+go test -count=1 -timeout=10m ./...
 ```
 
-其他 shell 可使用 `GOWORK=off go test -count=1 -timeout=10m ./...` 等形式。
-测试使用本机 TCP/UDP 端口；依赖未缓存时需要联网下载。
-测试目录中的 `test.crt` / `test.key` 是上游公开测试夹具，**严禁用作实际服务端身份**。
+## 运行
 
-## 后续接入方式
-
-保留 core 的原始 module 路径 `github.com/apernet/hysteria/core/v2`，便于追踪上游和维护内部 import。
-第 2 步建立独立 sidecar module 后，使用本地替换指向此快照：
-
-```go
-replace github.com/apernet/hysteria/core/v2 => ./hy2-core
+```powershell
+.\build\hyperconduit-tunnel.exe server --config examples\server.json
+.\build\hyperconduit-tunnel.exe client --config examples\client.json
 ```
 
-现在尚未创建该调用方 module，也没有添加占位版本或空程序。
-Java 模块、Gradle 构建和现有游戏行为均未切换到此 core。
+`--config` 只接受 JSON 文件，token 等凭据不能通过命令行传入。就绪后 stdout 输出一行 JSON，`listen` 是实际绑定地址：
+
+```json
+{"version":1,"event":"ready","mode":"server","listen":"127.0.0.1:25565"}
+```
+
+错误写 stderr；Ctrl+C 关闭进程。本机测试程序连接客户端输出的 `listen`，数据转发至服务端配置的目标。
+
+## 配置示例
+
+`examples/server.json` 默认只监听本机：`listen` 为 `127.0.0.1:25565`（省略时默认 `127.0.0.1:0`）；`target` 为 `127.0.0.1:25566`，即固定转发目标；`certFile` / `keyFile` 是 `cert.pem` / `key.pem` 占位文件名。
+
+`examples/client.json`：`server` 为 `127.0.0.1:25565`；`listen` 为 `127.0.0.1:0`；`caFile` 为 `cert.pem`。
+
+文件路径相对**进程工作目录**，不是配置文件所在目录。示例端口用于本机 echo 实验，与 Minecraft 默认端口不同，不是强制最终值。
+
+客户端不能选择 target；协议中的 service id 仅内部使用，服务端始终连接自己的 `target`。
+
+## 证书
+
+现阶段使用显式证书，遵循标准 TLS 校验：
+
+- 服务端必须提供 `certFile` 和 `keyFile`；客户端可选 `caFile`，缺省使用系统根证书。
+- 证书必须匹配客户端使用的名称/IP SAN。`serverName` 可覆盖校验名称；不要求是域名，带 IP SAN 的自签证书可用于本机实验。
+- 不支持 insecure 跳过校验，也没有 TOFU。不要使用 `hy2-core` 测试目录中的公开测试证书。
+- 自动生成身份与 TOFU 将在第 4 步加入。
+
+## token
+
+- 示例不设置 token，也不附带任何私钥；服务端默认免共享密钥。即使免 token，也只有配置的 MC 目标可达，Minecraft 自身登录认证不受影响。
+- 服务端设置 token 后，客户端必须配置相同值；token 不会出现在日志或 CLI 参数中。
+- 配置校验：最长 1024 字节，仅 printable ASCII，不能有首尾空白或 CR/LF（HTTP 字段限制）。
+
+## 拥塞与带宽
+
+- `congestion` 仅支持 `bbr` 或 `reno`。
+- 客户端 `upMbps` / `downMbps` 非零时，对应上传/下载方向采用 Brutal；未配置的方向使用发送端本地的 BBR/Reno。
+- 服务端 `upMbps` / `downMbps` 分别限制向客户端发送/接收的**单连接 Brutal 协商速率**，不是全局限速，也不限制 BBR/Reno；仅设置服务端带宽不会强制启用 Brutal。
+- `disableBrutal` 仅服务端有效，`true` 时双向使用 BBR/Reno；默认 `false`。客户端必须保持 `false`。
+
+## 限额与超时
+
+- `maxConnections` 默认 64：服务端限制 QUIC 连接数并限制全局后端连接；客户端限制本地连接。
+- `maxStreams` 默认 16，仅服务端生效。客户端写该字段当前会被接受但忽略，不推荐配置。
+- 连接超时与请求超时默认 5 秒，空闲超时默认 30 秒；QUIC 窗口和复制缓冲区均为有界值。
+
+## 当前边界
+
+- 仅按原始字节转发 TCP，不解析 Minecraft 协议。
+- 无直接 TCP fallback，断线后不自动重连。
+- 玩家来源地址、MC 连接关联和 F3 尚未接入。
+- 尚未接入 Java 模块；现有游戏行为未切换到此隧道。
+
+## 来源
+
+上游固定提交与改动记录见 [UPSTREAM.md](UPSTREAM.md)；依赖许可清单见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。core 上游仓库：<https://github.com/HyNetwork/hysteria>。

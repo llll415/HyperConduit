@@ -8,6 +8,7 @@ import (
 	"math/rand"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/apernet/quic-go"
@@ -64,9 +65,24 @@ func NewServer(config *Config) (Server, error) {
 		AssumePeerMaxDatagramFrameSize: protocol.MaxDatagramFrameSize,
 		DisablePathManager:             true,
 	}
+	if config.RequestTimeout > 0 {
+		quicConfig.HandshakeIdleTimeout = config.RequestTimeout
+	}
 	tr := &quic.Transport{
 		Conn:       config.Conn,
 		DisableGSO: config.QUICConfig.DisableGSO,
+	}
+	if config.MaxConnections > 0 {
+		slots := make(chan struct{}, config.MaxConnections)
+		tr.ConnContext = func(ctx context.Context, _ *quic.ClientInfo) (context.Context, error) {
+			select {
+			case slots <- struct{}{}:
+				context.AfterFunc(ctx, func() { <-slots })
+				return ctx, nil
+			default:
+				return nil, errors.New("connection limit reached")
+			}
+		}
 	}
 	// A nil key means quic-go never sends stateless resets. Clients then have to
 	// wait for the idle timeout to notice the server is gone, so keep them on
@@ -94,26 +110,67 @@ func NewServer(config *Config) (Server, error) {
 		config:   config,
 		tr:       tr,
 		listener: listener,
+		conns:    make(map[*quic.Conn]struct{}),
 	}, nil
 }
 
 type serverImpl struct {
-	config   *Config
-	tr       *quic.Transport
-	listener *quic.Listener
+	config    *Config
+	tr        *quic.Transport
+	listener  *quic.Listener
+	mu        sync.Mutex
+	closing   bool
+	conns     map[*quic.Conn]struct{}
+	closeOnce sync.Once
+	closeErr  error
 }
 
 func (s *serverImpl) Serve() error {
+	var clients sync.WaitGroup
+	defer clients.Wait()
 	for {
 		conn, err := s.listener.Accept(context.Background())
 		if err != nil {
+			_ = s.Close()
 			return err
 		}
-		go s.handleClient(conn)
+		s.mu.Lock()
+		if s.closing {
+			s.mu.Unlock()
+			_ = conn.CloseWithError(closeErrCodeOK, "server stopping")
+			continue
+		}
+		s.conns[conn] = struct{}{}
+		s.mu.Unlock()
+		clients.Add(1)
+		go func() {
+			defer clients.Done()
+			defer func() {
+				s.mu.Lock()
+				delete(s.conns, conn)
+				s.mu.Unlock()
+			}()
+			s.handleClient(conn)
+		}()
 	}
 }
 
 func (s *serverImpl) Close() error {
+	s.closeOnce.Do(func() { s.closeErr = s.close() })
+	return s.closeErr
+}
+
+func (s *serverImpl) close() error {
+	s.mu.Lock()
+	s.closing = true
+	conns := make([]*quic.Conn, 0, len(s.conns))
+	for conn := range s.conns {
+		conns = append(conns, conn)
+	}
+	s.mu.Unlock()
+	for _, conn := range conns {
+		_ = conn.CloseWithError(closeErrCodeOK, "server stopping")
+	}
 	err := errors.Join(s.listener.Close(), s.tr.Close(), s.config.Conn.Close())
 	if s.config.Cleanup != nil {
 		err = errors.Join(err, s.config.Cleanup.Close())
@@ -123,13 +180,27 @@ func (s *serverImpl) Close() error {
 
 func (s *serverImpl) handleClient(conn *quic.Conn) {
 	handler := newH3sHandler(s.config, conn)
+	if s.config.RequestTimeout > 0 {
+		handler.authTimer = time.AfterFunc(s.config.RequestTimeout, func() {
+			if !handler.authenticated.Load() {
+				_ = conn.CloseWithError(closeErrCodeOK, "authentication timed out")
+			}
+		})
+		defer handler.authTimer.Stop()
+	}
 	h3s := http3.Server{
 		Handler:          handler,
 		StreamDispatcher: handler.ProxyStreamHijacker,
+		MaxHeaderBytes:   16 * 1024,
 	}
 	err := h3s.ServeQUICConn(conn)
+	_ = conn.CloseWithError(closeErrCodeOK, "")
+	handler.streamMutex.Lock()
+	handler.closing = true
+	handler.streamMutex.Unlock()
+	handler.streams.Wait()
 	// If the client is authenticated, we need to log the disconnect event
-	if handler.authenticated {
+	if handler.authenticated.Load() {
 		if tl := s.config.TrafficLogger; tl != nil {
 			tl.LogOnlineState(handler.authID, false)
 		}
@@ -144,10 +215,14 @@ type h3sHandler struct {
 	config *Config
 	conn   *quic.Conn
 
-	authenticated bool
+	authenticated atomic.Bool
 	authMutex     sync.Mutex
 	authID        string
 	connID        uint32 // a random id for dump streams
+	authTimer     *time.Timer
+	streams       sync.WaitGroup
+	streamMutex   sync.Mutex
+	closing       bool
 
 	udpSM *udpSessionManager // Only set after authentication
 }
@@ -164,7 +239,7 @@ func (h *h3sHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodPost && r.Host == protocol.URLHost && r.URL.Path == protocol.URLPath {
 		h.authMutex.Lock()
 		defer h.authMutex.Unlock()
-		if h.authenticated {
+		if h.authenticated.Load() {
 			// Already authenticated
 			protocol.AuthResponseToHeader(w.Header(), protocol.AuthResponse{
 				UDPEnabled: !h.config.DisableUDP,
@@ -179,7 +254,6 @@ func (h *h3sHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		ok, id := h.config.Authenticator.Authenticate(h.conn.RemoteAddr(), authReq.Auth, actualTx)
 		if ok {
 			// Set authenticated flag
-			h.authenticated = true
 			h.authID = id
 			if h.config.IgnoreClientBandwidth {
 				// Ignore client bandwidth and use the configured congestion controller.
@@ -205,6 +279,10 @@ func (h *h3sHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				Rx:         h.config.BandwidthConfig.MaxRx,
 				RxAuto:     h.config.IgnoreClientBandwidth,
 			})
+			h.authenticated.Store(true)
+			if h.authTimer != nil {
+				h.authTimer.Stop()
+			}
 			w.WriteHeader(protocol.StatusAuthOK)
 			// Call event logger
 			if tl := h.config.TrafficLogger; tl != nil {
@@ -238,7 +316,7 @@ func (h *h3sHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *h3sHandler) ProxyStreamHijacker(ft http3.FrameType, stream *quic.Stream, err error) (bool, error) {
-	if err != nil || !h.authenticated {
+	if err != nil || !h.authenticated.Load() {
 		return false, nil
 	}
 
@@ -251,7 +329,18 @@ func (h *h3sHandler) ProxyStreamHijacker(ft http3.FrameType, stream *quic.Stream
 		}
 		// Wraps the stream with QStream, which handles Close() properly
 		qStream := &utils.QStream{Stream: stream}
-		go h.handleTCPRequest(qStream)
+		h.streamMutex.Lock()
+		if h.closing {
+			h.streamMutex.Unlock()
+			_ = qStream.Close()
+			return true, nil
+		}
+		h.streams.Add(1)
+		h.streamMutex.Unlock()
+		go func() {
+			defer h.streams.Done()
+			h.handleTCPRequest(qStream)
+		}()
 		return true, nil
 	default:
 		return false, nil
@@ -259,6 +348,10 @@ func (h *h3sHandler) ProxyStreamHijacker(ft http3.FrameType, stream *quic.Stream
 }
 
 func (h *h3sHandler) handleTCPRequest(stream *utils.QStream) {
+	defer stream.Close()
+	if h.config.RequestTimeout > 0 {
+		_ = stream.SetDeadline(time.Now().Add(h.config.RequestTimeout))
+	}
 	trafficLogger := h.config.TrafficLogger
 	streamStats := &StreamStats{
 		AuthID:      h.authID,
@@ -319,9 +412,13 @@ func (h *h3sHandler) handleTCPRequest(stream *utils.QStream) {
 		}
 		return
 	}
+	defer tConn.Close()
 	if !hooked {
-		_ = protocol.WriteTCPResponse(stream, true, "Connected")
+		if err := protocol.WriteTCPResponse(stream, true, "Connected"); err != nil {
+			return
+		}
 	}
+	_ = stream.SetDeadline(time.Time{})
 	streamStats.State.Store(StreamStateEstablished)
 	// Put back the data if the hook requested
 	if len(putback) > 0 {

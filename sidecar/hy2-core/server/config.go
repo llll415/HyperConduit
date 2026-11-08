@@ -41,6 +41,9 @@ type Config struct {
 	EventLogger           EventLogger
 	TrafficLogger         TrafficLogger
 	MasqHandler           http.Handler
+	// HyperConduit: optional transport admission and TCP request bounds.
+	MaxConnections int
+	RequestTimeout time.Duration
 }
 
 // fill fills the fields that are not set by the user with default values when possible,
@@ -95,7 +98,13 @@ func (c *Config) fill() error {
 		return errors.ConfigError{Field: "Conn", Reason: "must be set"}
 	}
 	if c.Outbound == nil {
-		c.Outbound = &defaultOutbound{}
+		return errors.ConfigError{Field: "Outbound", Reason: "must be explicitly configured"}
+	}
+	if c.MaxConnections < 0 {
+		return errors.ConfigError{Field: "MaxConnections", Reason: "must not be negative"}
+	}
+	if c.RequestTimeout < 0 {
+		return errors.ConfigError{Field: "RequestTimeout", Reason: "must not be negative"}
 	}
 	if c.BandwidthConfig.MaxTx != 0 && c.BandwidthConfig.MaxTx < 65536 {
 		return errors.ConfigError{Field: "BandwidthConfig.MaxTx", Reason: "must be at least 65536"}
@@ -172,49 +181,6 @@ type UDPConn interface {
 	ReadFrom(b []byte) (int, string, error)
 	WriteTo(b []byte, addr string) (int, error)
 	Close() error
-}
-
-type defaultOutbound struct{}
-
-var defaultOutboundDialer = net.Dialer{
-	Timeout: 10 * time.Second,
-}
-
-func (o *defaultOutbound) TCP(reqAddr string) (net.Conn, error) {
-	return defaultOutboundDialer.Dial("tcp", reqAddr)
-}
-
-func (o *defaultOutbound) UDP(reqAddr string) (UDPConn, error) {
-	conn, err := net.ListenUDP("udp", nil)
-	if err != nil {
-		return nil, err
-	}
-	return &defaultUDPConn{conn}, nil
-}
-
-func (o *defaultOutbound) CheckUDP(reqAddr string) error {
-	return nil
-}
-
-type defaultUDPConn struct {
-	*net.UDPConn
-}
-
-func (c *defaultUDPConn) ReadFrom(b []byte) (int, string, error) {
-	n, addr, err := c.UDPConn.ReadFrom(b)
-	if addr != nil {
-		return n, addr.String(), err
-	} else {
-		return n, "", err
-	}
-}
-
-func (c *defaultUDPConn) WriteTo(b []byte, addr string) (int, error) {
-	uAddr, err := net.ResolveUDPAddr("udp", addr)
-	if err != nil {
-		return 0, err
-	}
-	return c.UDPConn.WriteTo(b, uAddr)
 }
 
 // BandwidthConfig describes the maximum bandwidth that the server can use, in bytes per second.

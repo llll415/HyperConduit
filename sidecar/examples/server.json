@@ -1,0 +1,6 @@
+{
+  "listen": "127.0.0.1:25565",
+  "target": "127.0.0.1:25566",
+  "certFile": "cert.pem",
+  "keyFile": "key.pem"
+}

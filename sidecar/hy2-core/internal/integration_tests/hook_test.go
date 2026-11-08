@@ -39,6 +39,7 @@ func TestClientServerHookTCP(t *testing.T) {
 	s, err := server.NewServer(&server.Config{
 		TLSConfig:     serverTLSConfig(),
 		Conn:          udpConn,
+		Outbound:      testOutbound{},
 		RequestHook:   hook,
 		Authenticator: auth,
 	})
@@ -102,6 +103,7 @@ func TestClientServerHookUDP(t *testing.T) {
 	s, err := server.NewServer(&server.Config{
 		TLSConfig:     serverTLSConfig(),
 		Conn:          udpConn,
+		Outbound:      testOutbound{},
 		RequestHook:   hook,
 		Authenticator: auth,
 	})

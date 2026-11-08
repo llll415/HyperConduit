@@ -4,6 +4,7 @@ import (
 	"crypto/tls"
 	"io"
 	"net"
+	"time"
 
 	"github.com/apernet/hysteria/core/v2/server"
 )
@@ -32,6 +33,52 @@ func serverConn() (net.PacketConn, net.Addr, error) {
 		return nil, nil, err
 	}
 	return udpConn, udpAddr, nil
+}
+
+// testOutbound is the outbound used by integration tests that only care about
+// the server-side behavior. It forwards to the real target and keeps the
+// full-cone UDP semantics the server used to provide by default.
+type testOutbound struct{}
+
+var testOutboundDialer = net.Dialer{
+	Timeout: 10 * time.Second,
+}
+
+func (o testOutbound) TCP(reqAddr string) (net.Conn, error) {
+	return testOutboundDialer.Dial("tcp", reqAddr)
+}
+
+func (o testOutbound) UDP(reqAddr string) (server.UDPConn, error) {
+	conn, err := net.ListenUDP("udp", nil)
+	if err != nil {
+		return nil, err
+	}
+	return &testUDPConn{conn}, nil
+}
+
+func (o testOutbound) CheckUDP(reqAddr string) error {
+	return nil
+}
+
+// testUDPConn is the full-cone UDP connection wrapper used by testOutbound.
+type testUDPConn struct {
+	*net.UDPConn
+}
+
+func (c *testUDPConn) ReadFrom(b []byte) (int, string, error) {
+	n, addr, err := c.UDPConn.ReadFrom(b)
+	if addr != nil {
+		return n, addr.String(), err
+	}
+	return n, "", err
+}
+
+func (c *testUDPConn) WriteTo(b []byte, addr string) (int, error) {
+	uAddr, err := net.ResolveUDPAddr("udp", addr)
+	if err != nil {
+		return 0, err
+	}
+	return c.UDPConn.WriteTo(b, uAddr)
 }
 
 // tcpEchoServer is a TCP server that echoes what it reads from the connection.

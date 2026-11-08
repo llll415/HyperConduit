@@ -39,6 +39,7 @@ func TestClientServerBadAuth(t *testing.T) {
 	s, err := server.NewServer(&server.Config{
 		TLSConfig:     serverTLSConfig(),
 		Conn:          udpConn,
+		Outbound:      testOutbound{},
 		Authenticator: auth,
 	})
 	assert.NoError(t, err)
@@ -68,6 +69,7 @@ func TestClientServerUDPDisabled(t *testing.T) {
 		TLSConfig:     serverTLSConfig(),
 		Conn:          udpConn,
 		DisableUDP:    true,
+		Outbound:      testOutbound{},
 		Authenticator: auth,
 	})
 	assert.NoError(t, err)
@@ -98,6 +100,7 @@ func TestClientServerTCPEcho(t *testing.T) {
 	s, err := server.NewServer(&server.Config{
 		TLSConfig:     serverTLSConfig(),
 		Conn:          udpConn,
+		Outbound:      testOutbound{},
 		Authenticator: auth,
 	})
 	assert.NoError(t, err)
@@ -145,6 +148,7 @@ func TestClientServerUDPEcho(t *testing.T) {
 	s, err := server.NewServer(&server.Config{
 		TLSConfig:     serverTLSConfig(),
 		Conn:          udpConn,
+		Outbound:      testOutbound{},
 		Authenticator: auth,
 	})
 	assert.NoError(t, err)
@@ -192,6 +196,7 @@ func TestClientServerHandshakeInfo(t *testing.T) {
 	s, err := server.NewServer(&server.Config{
 		TLSConfig:     serverTLSConfig(),
 		Conn:          udpConn,
+		Outbound:      testOutbound{},
 		Authenticator: auth,
 	})
 	assert.NoError(t, err)
@@ -222,6 +227,7 @@ func TestClientServerHandshakeInfo(t *testing.T) {
 	s, err = server.NewServer(&server.Config{
 		TLSConfig: serverTLSConfig(),
 		Conn:      udpConn,
+		Outbound:  testOutbound{},
 		BandwidthConfig: server.BandwidthConfig{
 			MaxRx: 100000,
 		},
@@ -256,6 +262,7 @@ func TestClientServerHandshakeInfo(t *testing.T) {
 	s, err = server.NewServer(&server.Config{
 		TLSConfig:             serverTLSConfig(),
 		Conn:                  udpConn,
+		Outbound:              testOutbound{},
 		IgnoreClientBandwidth: true,
 		Authenticator:         auth,
 	})

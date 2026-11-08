@@ -28,9 +28,12 @@ func copyBufferLog(dst io.Writer, src io.Reader, log func(n uint64) bool) error 
 				// Log returns false, which means that the client should be disconnected
 				return errDisconnect
 			}
-			_, ew := dst.Write(buf[0:nr])
+			nw, ew := dst.Write(buf[0:nr])
 			if ew != nil {
 				return ew
+			}
+			if nw != nr {
+				return io.ErrShortWrite
 			}
 		}
 		if er != nil {
@@ -43,7 +46,7 @@ func copyBufferLog(dst io.Writer, src io.Reader, log func(n uint64) bool) error 
 	}
 }
 
-func copyTwoWayEx(id string, serverRw, remoteRw io.ReadWriter, l TrafficLogger, stats *StreamStats) error {
+func copyTwoWayEx(id string, serverRw, remoteRw io.ReadWriteCloser, l TrafficLogger, stats *StreamStats) error {
 	errChan := make(chan error, 2)
 	go func() {
 		errChan <- copyBufferLog(serverRw, remoteRw, func(n uint64) bool {
@@ -59,13 +62,16 @@ func copyTwoWayEx(id string, serverRw, remoteRw io.ReadWriter, l TrafficLogger, 
 			return l.LogTraffic(id, n, 0)
 		})
 	}()
-	// Block until one of the two goroutines returns
-	return <-errChan
+	err := <-errChan
+	_ = serverRw.Close()
+	_ = remoteRw.Close()
+	<-errChan
+	return err
 }
 
 // copyTwoWay is the "fast-path" version of copyTwoWayEx that does not log traffic or update stream stats.
 // It uses the built-in io.Copy instead of our own copyBufferLog.
-func copyTwoWay(serverRw, remoteRw io.ReadWriter) error {
+func copyTwoWay(serverRw, remoteRw io.ReadWriteCloser) error {
 	errChan := make(chan error, 2)
 	go func() {
 		_, err := io.Copy(serverRw, remoteRw)
@@ -75,6 +81,9 @@ func copyTwoWay(serverRw, remoteRw io.ReadWriter) error {
 		_, err := io.Copy(remoteRw, serverRw)
 		errChan <- err
 	}()
-	// Block until one of the two goroutines returns
-	return <-errChan
+	err := <-errChan
+	_ = serverRw.Close()
+	_ = remoteRw.Close()
+	<-errChan
+	return err
 }
