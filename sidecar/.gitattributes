@@ -1,0 +1,3 @@
+# Preserve the exact upstream snapshot, including original line endings.
+hy2-core/** -text
+licenses/** -text
