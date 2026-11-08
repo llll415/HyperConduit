@@ -105,6 +105,7 @@ type TLSConfig struct {
 	ServerName            string
 	InsecureSkipVerify    bool
 	VerifyPeerCertificate func(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error
+	VerifyConnection      func(tls.ConnectionState) error
 	RootCAs               *x509.CertPool
 	GetClientCertificate  func(*tls.CertificateRequestInfo) (*tls.Certificate, error)
 	ECHConfigList         []byte

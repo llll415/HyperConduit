@@ -1,5 +1,5 @@
 {
   "server": "127.0.0.1:25565",
   "listen": "127.0.0.1:0",
-  "caFile": "cert.pem"
+  "stateDir": "config/hyperconduit"
 }

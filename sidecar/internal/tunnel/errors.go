@@ -10,6 +10,7 @@ import (
 
 	coreerrors "github.com/apernet/hysteria/core/v2/errors"
 	"github.com/apernet/quic-go"
+	"github.com/llll415/HyperConduit/sidecar/internal/trust"
 )
 
 // ErrorCode is a fixed, non-sensitive classification of a tunnel failure.
@@ -20,6 +21,8 @@ type ErrorCode string
 const (
 	CodeConfig         ErrorCode = "config"
 	CodeTLS            ErrorCode = "tls"
+	CodeIdentity       ErrorCode = "identity_changed"
+	CodeStorage        ErrorCode = "storage"
 	CodeAuthentication ErrorCode = "authentication"
 	CodeTimeout        ErrorCode = "timeout"
 	CodeCanceled       ErrorCode = "canceled"
@@ -68,6 +71,10 @@ func (c ErrorCode) description() string {
 		return "invalid configuration"
 	case CodeTLS:
 		return "TLS verification failed"
+	case CodeIdentity:
+		return "server identity changed"
+	case CodeStorage:
+		return "identity or trust storage unavailable"
 	case CodeAuthentication:
 		return "authentication failed"
 	case CodeTimeout:
@@ -104,6 +111,14 @@ func classifyError(op string, err error) error {
 // classification: cancellation, then certificate verification, then timeout,
 // then the core error types, then the QUIC stream limit, and finally transport.
 func classifyCode(err error) ErrorCode {
+	var changed *trust.ChangedError
+	if errors.As(err, &changed) {
+		return CodeIdentity
+	}
+	var storage *trust.StorageError
+	if errors.As(err, &storage) {
+		return CodeStorage
+	}
 	switch {
 	case errors.Is(err, context.Canceled):
 		return CodeCanceled

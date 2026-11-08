@@ -41,6 +41,7 @@
   - `server/config.go`、`server/server.go`：增加连接/错误观察回调与可选 `ContextOutbound`，传递真实 QUIC 对端和 stream ID，后端拨号支持请求取消。
   - `errors/errors.go`：增加类型化 admission limit 错误，避免按文本猜测原因。
   - 未修改带宽协议或拥塞算法；保留 `TrafficLogger` 和原有事件接口。两端 ID 仅在各自进程内有效，不要求相同。
+- 第 4 步（2026-11-09）：`client/config.go`、`client/client.go` 透传标准库 `VerifyConnection` 回调，用于在 TLS 密钥证明后检查 SPKI；未改协议、TLS 算法或 QUIC 依赖。身份生成、文件锁、信任存储位于调用方 `internal/identity`、`internal/privatefile`、`internal/trust`。
 
 ## 测试基线
 
@@ -80,3 +81,10 @@ git rev-parse 832a525:sidecar/hy2-core
 - 14 组双向协商、单连接带宽隔离、stream 关联、并发状态读取、错误计数与取消回归通过；sidecar 及核心上下文用例重复 5 次通过。
 - 两个 module 的 `go vet`、依赖校验及无 CGO CLI 构建通过。报告：本机临时目录 `opencode/hyperconduit-{sidecar,core}-step3-tests.jsonl`。
 - 未运行 race detector，未验证 MC 接入、公网性能或其他平台。
+
+## 第 4 步验证
+
+- Windows amd64 / Go 1.26.4：sidecar 6 包、316 个测试/子测试通过；1 个 Unix 权限用例在 Windows 跳过，0 失败。core 8 包、141 个通过，0 跳过/失败。
+- 覆盖自动身份复用/续期、SPKI 变化拒绝、失败不落 pin、损坏存储、跨进程单赢家、锁取消与 Windows 私有 DACL；sidecar 重复 3 次通过。
+- 两个 module 的 `go vet`、sidecar 依赖校验通过；无 CGO 构建 Windows amd64、Linux amd64、macOS arm64 通过。Linux/macOS 仅编译，未运行。
+- 报告位于本机临时目录 `opencode/hyperconduit-{sidecar,core}-step4-tests.jsonl`。未做 race、MC 或公网验证。

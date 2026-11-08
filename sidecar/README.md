@@ -1,10 +1,10 @@
 # HyperConduit Go sidecar
 
-独立 Go 隧道可运行，尚未接入 Minecraft/Java。仅转发服务端配置的目标，不提供应用 UDP 转发或直接 TCP 回退。
+独立 Go 隧道，尚未接入 Minecraft/Java。仅转发服务端配置的固定目标，不提供应用 UDP 转发或直接 TCP 回退。
 
 ## 目录
 
-`cmd/hyperconduit-tunnel/` CLI；`internal/config/` 配置校验；`internal/tunnel/` 隧道与限制；`examples/` 示例。来源与许可见 [UPSTREAM.md](UPSTREAM.md)、[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
+`cmd/hyperconduit-tunnel/` CLI；`internal/config/` 配置校验；`internal/identity/` 服务端身份；`internal/trust/` SPKI 信任库；`internal/tunnel/` 隧道与限制；`examples/` 示例。来源见 [UPSTREAM.md](UPSTREAM.md)，第三方许可见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) 与 [licenses/](licenses/)。
 
 ## 构建
 
@@ -37,32 +37,69 @@ go test -count=1 -timeout=10m ./...
 .\build\hyperconduit-tunnel.exe client --config examples\client.json
 ```
 
-`--config` 只接受 JSON 文件，token 等凭据不能通过命令行传入。就绪后 stdout 输出一行 JSON，`listen` 是实际绑定地址：
+`--config` 只接受 JSON 文件，token 等凭据不能通过命令行传入。就绪后 stdout 输出一行 JSON，`listen` 是实际绑定地址；服务端还带 `fingerprint`：
 
 ```json
-{"version":1,"event":"ready","mode":"server","listen":"127.0.0.1:25565"}
+{"version":1,"event":"ready","mode":"server","listen":"127.0.0.1:25565","fingerprint":"SHA256:..."}
 ```
 
 错误写 stderr，隧道错误包含 `code` 和 `op`，不输出底层敏感信息；Ctrl+C 关闭进程。本机测试程序连接客户端输出的 `listen`。
 
 ## 配置示例
 
-`examples/server.json` 默认只监听本机：`listen` 为 `127.0.0.1:25565`（省略时默认 `127.0.0.1:0`）；`target` 为 `127.0.0.1:25566`，即固定转发目标；`certFile` / `keyFile` 是 `cert.pem` / `key.pem` 占位文件名。
+`examples/server.json`：`listen` 为 `127.0.0.1:25565`，`target` 为 `127.0.0.1:25566`，`stateDir` 为 `config/hyperconduit`。未配置证书时自动生成身份，默认位于 `config/hyperconduit/server-identity.json`。
 
-`examples/client.json`：`server` 为 `127.0.0.1:25565`；`listen` 为 `127.0.0.1:0`；`caFile` 为 `cert.pem`。
+`examples/client.json`：`server` 为 `127.0.0.1:25565`，`listen` 为 `127.0.0.1:0`，`stateDir` 同为 `config/hyperconduit`，未配置 `caFile`，使用 TOFU。两个示例共用 `stateDir` 仅便于本机演示；服务端身份与客户端 `known-servers.json` 是不同文件，不会互相覆盖。
 
-文件路径相对**进程工作目录**，不是配置文件所在目录。示例端口用于本机 echo 实验，与 Minecraft 默认端口不同，不是强制最终值。
+文件路径相对**进程工作目录**，不是配置文件所在目录。示例端口用于本机 echo 实验，与 Minecraft 默认端口不同。客户端不能选择 target；服务端始终连接自己的 `target`。
 
-客户端不能选择 target；协议中的 service id 仅内部使用，服务端始终连接自己的 `target`。
+## 配置字段
 
-## 证书
+| 字段 | 默认 | 说明 |
+| --- | --- | --- |
+| `listen` | `127.0.0.1:0` | 服务端可监听 IP:端口；客户端只允许回环地址且端口为 0 |
+| `server` | 无 | 仅客户端，服务端 `host:port` |
+| `target` | 无 | 仅服务端，固定转发目标 `host:port` |
+| `token` | 空 | 两端一致；为空表示免共享密钥 |
+| `certFile` / `keyFile` | 空 | 仅服务端，显式证书对，必须同时提供 |
+| `caFile` | 空 | 仅客户端，启用标准 CA 校验 |
+| `serverName` | 空 | 仅客户端 CA 模式，覆盖校验名称 |
+| `stateDir` | `config/hyperconduit` | 状态文件目录 |
+| `identityFile` | `stateDir/server-identity.json` | 仅服务端，托管身份文件 |
+| `knownServersFile` | `stateDir/known-servers.json` | 仅客户端 TOFU 信任库 |
+| `congestion` | `bbr` | `bbr` 或 `reno` |
+| `upMbps` / `downMbps` | 0 | 客户端声明带宽；服务端限制单连接 Brutal 速率，详见下文 |
+| `disableBrutal` | `false` | 仅服务端 |
+| `maxConnections` | 64 | 1–4096 |
+| `maxStreams` | 16 | 仅服务端，8–1024 |
+| `connectTimeoutMs` | 5000 | 100–120000 |
+| `requestTimeoutMs` | 5000 | 100–120000 |
+| `idleTimeoutMs` | 30000 | 4000–120000 |
 
-现阶段使用显式证书，遵循标准 TLS 校验：
+## 服务端身份
 
-- 服务端必须提供 `certFile` 和 `keyFile`；客户端可选 `caFile`，缺省使用系统根证书。
-- 证书必须匹配客户端使用的名称/IP SAN。`serverName` 可覆盖校验名称；不要求是域名，带 IP SAN 的自签证书可用于本机实验。
-- 不支持 insecure 跳过校验，也没有 TOFU。不要使用 `hy2-core` 测试目录中的公开测试证书。
-- 自动生成身份与 TOFU 将在第 4 步加入。
+- 未提供 `certFile` / `keyFile` 时，服务端首次启动生成自签名 ECDSA P-256 证书，保存在单个 JSON 文件中，同时含证书与 PKCS#8 私钥；文件权限受限（Unix 0600；Windows 使用受保护 DACL，仅 SYSTEM 与当前用户）。不要分享或提交该文件。
+- 证书有效期 1 年；到期前 30 天用同一密钥重签，SPKI 指纹保持不变。`GetCertificate` 会检查缓存，超过 24 小时或临近到期时重新加载或续签。
+- `certFile` 与 `keyFile` 必须成对提供，且不能与 `identityFile` 同时使用；`identityFile` 仅服务端有效。省略时使用上述默认路径。
+- 已有文件损坏、无法读取或证书与私钥不匹配时直接报错，不会自动重建或覆盖；需人工检查或移走后再启动。
+
+## 客户端信任（TOFU）
+
+- 未配置 `caFile` 时使用 TOFU：信任键是用户输入的规范化 `host:port`，不按 DNS 解析出的 IP。首次 TLS 握手成功并通过 token 认证后才写入 pin。
+- 首次信任仍可能被中间人利用（TOFU 固有局限）。可对照服务端 ready 事件中的 `fingerprint`（`SHA256:` 前缀）确认。
+- 已记录条目后续指纹变化会被拒绝。并发首次连接会在锁内复查，后到者不能覆盖已写入的 pin。
+- 信任库默认位于 `stateDir/known-servers.json`。文件损坏或条目非法时报错，不会自动重建。
+- 配置、身份和信任文件会收紧访问权限；状态目录应由运行账户管理，不应放在公共可写目录。管理员/root 仍可访问本机文件。
+- 配置 `caFile` 后回到标准 CA 校验，此时不能同时设置 `knownServersFile`；`serverName` 仅在 CA 模式下有效。没有跳过校验的 insecure 开关；TOFU 模式内部以 SPKI 校验替代 CA/主机名校验，并非不认证。
+
+## 信任管理
+
+```powershell
+.\build\hyperconduit-tunnel.exe trust list --config examples\client.json
+.\build\hyperconduit-tunnel.exe trust forget --config examples\client.json --server 127.0.0.1:25565
+```
+
+仅 TOFU 模式可用，配置了 `caFile` 会报错。`forget` 只删除指定 endpoint 条目，不影响已建立的活动会话；下次连接会重新走首次信任。
 
 ## token
 
@@ -88,7 +125,7 @@ go test -count=1 -timeout=10m ./...
 - 仅按原始字节转发 TCP，不解析 Minecraft 协议。
 - 无直接 TCP fallback，断线后不自动重连。
 - 玩家来源地址、MC 连接关联和 F3 尚未接入。
-- 尚未接入 Java 模块；现有游戏行为未切换到此隧道。
+- Java 模块尚未接入，游戏内 token 输入与 Java 侧控制均未连接；身份与信任文件当前只由 Go sidecar 写入。
 
 ## 状态接口
 
@@ -99,4 +136,4 @@ Go 调用方可通过 `Endpoint.Status()` 读取活动连接、TCP↔stream 关�
 
 ## 来源
 
-上游固定提交与改动记录见 [UPSTREAM.md](UPSTREAM.md)；依赖许可清单见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。core 上游仓库：<https://github.com/HyNetwork/hysteria>。
+上游固定提交与改动记录见 [UPSTREAM.md](UPSTREAM.md)；依赖许可清单见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)，许可原文在 [licenses/](licenses/)。core 上游仓库：<https://github.com/HyNetwork/hysteria>。

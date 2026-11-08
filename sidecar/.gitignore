@@ -1,0 +1,2 @@
+# Runtime identity/trust state may contain private keys and credentials.
+/config/

@@ -8,9 +8,11 @@ import (
 	"fmt"
 	"io"
 	"net"
-	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
+
+	"github.com/llll415/HyperConduit/sidecar/internal/privatefile"
 )
 
 const (
@@ -44,6 +46,9 @@ type Config struct {
 	KeyFile          string `json:"keyFile"`
 	CAFile           string `json:"caFile"`
 	ServerName       string `json:"serverName"`
+	StateDir         string `json:"stateDir"`
+	IdentityFile     string `json:"identityFile"`
+	KnownServersFile string `json:"knownServersFile"`
 	Congestion       string `json:"congestion"`
 	UpMbps           uint64 `json:"upMbps"`
 	DownMbps         uint64 `json:"downMbps"`
@@ -60,13 +65,9 @@ type Config struct {
 // data, and malformed JSON are rejected. Errors never include the file contents
 // or the token value.
 func Load(path, mode string) (Config, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return Config{}, fmt.Errorf("config: cannot open file: %w", err)
-	}
-	defer f.Close()
-
-	data, err := io.ReadAll(io.LimitReader(f, maxConfigBytes+1))
+	// Configurations may contain tokens. Use the same protected regular-file
+	// reader as identity storage, including restrictive Windows DACLs.
+	data, err := privatefile.Read(path, maxConfigBytes+1)
 	if err != nil {
 		return Config{}, fmt.Errorf("config: cannot read file: %w", err)
 	}
@@ -147,6 +148,18 @@ func (c Config) normalizeClient() (Config, error) {
 	if c.KeyFile != "" {
 		return Config{}, errors.New("keyFile: must be empty in client mode")
 	}
+	if c.IdentityFile != "" {
+		return Config{}, errors.New("identityFile: only available in server mode")
+	}
+	if c.CAFile != "" && c.KnownServersFile != "" {
+		return Config{}, errors.New("caFile: cannot be combined with knownServersFile")
+	}
+	if c.CAFile == "" && c.ServerName != "" {
+		return Config{}, errors.New("serverName: only used with caFile")
+	}
+	if c.CAFile == "" && c.KnownServersFile == "" {
+		c.KnownServersFile = filepath.Join(c.StateDir, "known-servers.json")
+	}
 	if c.DisableBrutal {
 		return Config{}, errors.New("disableBrutal: must be false in client mode")
 	}
@@ -169,11 +182,17 @@ func (c Config) normalizeServer() (Config, error) {
 	if err := validateDialAddress("target", c.Target); err != nil {
 		return Config{}, err
 	}
-	if c.CertFile == "" {
-		return Config{}, errors.New("certFile: is required in server mode")
+	if (c.CertFile == "") != (c.KeyFile == "") {
+		return Config{}, errors.New("certFile/keyFile: must be provided together")
 	}
-	if c.KeyFile == "" {
-		return Config{}, errors.New("keyFile: is required in server mode")
+	if c.CertFile != "" && c.IdentityFile != "" {
+		return Config{}, errors.New("identityFile: cannot be combined with certFile/keyFile")
+	}
+	if c.CertFile == "" && c.IdentityFile == "" {
+		c.IdentityFile = filepath.Join(c.StateDir, "server-identity.json")
+	}
+	if c.KnownServersFile != "" {
+		return Config{}, errors.New("knownServersFile: only available in client mode")
 	}
 	if c.CAFile != "" {
 		return Config{}, errors.New("caFile: must be empty in server mode")
@@ -186,6 +205,9 @@ func (c Config) normalizeServer() (Config, error) {
 }
 
 func (c Config) withDefaults() Config {
+	if c.StateDir == "" {
+		c.StateDir = filepath.Join("config", "hyperconduit")
+	}
 	if c.Listen == "" {
 		c.Listen = defaultListen
 	}

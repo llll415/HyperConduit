@@ -118,6 +118,7 @@ func (c *clientImpl) connect(ctx context.Context) (*HandshakeInfo, error) {
 		ServerName:                     c.config.TLSConfig.ServerName,
 		InsecureSkipVerify:             c.config.TLSConfig.InsecureSkipVerify,
 		VerifyPeerCertificate:          c.config.TLSConfig.VerifyPeerCertificate,
+		VerifyConnection:               c.config.TLSConfig.VerifyConnection,
 		RootCAs:                        c.config.TLSConfig.RootCAs,
 		GetClientCertificate:           c.config.TLSConfig.GetClientCertificate,
 		EncryptedClientHelloConfigList: c.config.TLSConfig.ECHConfigList,

@@ -131,7 +131,7 @@ func (s *statusStore) record(err error) {
 // folded into CodeTransport instead of creating an arbitrary map key.
 func knownErrorCode(code ErrorCode) ErrorCode {
 	switch code {
-	case CodeConfig, CodeTLS, CodeAuthentication, CodeTimeout,
+	case CodeConfig, CodeTLS, CodeIdentity, CodeStorage, CodeAuthentication, CodeTimeout,
 		CodeCanceled, CodeLimit, CodeTarget, CodeTransport:
 		return code
 	default:

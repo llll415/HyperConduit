@@ -9,9 +9,12 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"sort"
 	"syscall"
+	"time"
 
 	"github.com/llll415/HyperConduit/sidecar/internal/config"
+	"github.com/llll415/HyperConduit/sidecar/internal/trust"
 	"github.com/llll415/HyperConduit/sidecar/internal/tunnel"
 )
 
@@ -39,6 +42,9 @@ func main() {
 }
 
 func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
+	if len(args) > 0 && args[0] == "trust" {
+		return runTrust(ctx, args[1:], stdout, stderr)
+	}
 	if len(args) == 0 || (args[0] != "client" && args[0] != "server") {
 		return errors.New("usage: hyperconduit-tunnel client|server --config <file.json>")
 	}
@@ -67,12 +73,71 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	}
 	defer endpoint.Close()
 	if err := json.NewEncoder(stdout).Encode(struct {
-		Version int    `json:"version"`
-		Event   string `json:"event"`
-		Mode    string `json:"mode"`
-		Listen  string `json:"listen"`
-	}{1, "ready", mode, endpoint.Addr().String()}); err != nil {
+		Version     int    `json:"version"`
+		Event       string `json:"event"`
+		Mode        string `json:"mode"`
+		Listen      string `json:"listen"`
+		Fingerprint string `json:"fingerprint,omitempty"`
+	}{1, "ready", mode, endpoint.Addr().String(), endpoint.Fingerprint()}); err != nil {
 		return errors.New("cannot write ready event")
 	}
 	return endpoint.Wait()
+}
+
+func runTrust(ctx context.Context, args []string, stdout, stderr io.Writer) error {
+	if len(args) == 0 || (args[0] != "list" && args[0] != "forget") {
+		return errors.New("usage: hyperconduit-tunnel trust list|forget --config <client.json> [--server <host:port>]")
+	}
+	flags := flag.NewFlagSet("trust", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	path := flags.String("config", "", "Client configuration file")
+	address := flags.String("server", "", "Server to forget")
+	if err := flags.Parse(args[1:]); err != nil {
+		return err
+	}
+	if *path == "" || flags.NArg() != 0 {
+		return errors.New("--config is required")
+	}
+	c, err := config.Load(*path, config.ModeClient)
+	if err != nil {
+		return err
+	}
+	if c.CAFile != "" {
+		return errors.New("trust commands require TOFU mode")
+	}
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	store := trust.New(c.KnownServersFile)
+	if args[0] == "forget" {
+		if *address == "" {
+			return errors.New("--server is required")
+		}
+		if err := store.Forget(ctx, *address); err != nil {
+			return err
+		}
+		return json.NewEncoder(stdout).Encode(struct {
+			Version int    `json:"version"`
+			Event   string `json:"event"`
+		}{1, "forgotten"})
+	}
+	if *address != "" {
+		return errors.New("--server is only used with forget")
+	}
+	entries, err := store.Entries(ctx)
+	if err != nil {
+		return err
+	}
+	type entry struct {
+		Endpoint    string `json:"endpoint"`
+		Fingerprint string `json:"fingerprint"`
+	}
+	list := make([]entry, 0, len(entries))
+	for endpoint, pin := range entries {
+		list = append(list, entry{endpoint, pin})
+	}
+	sort.Slice(list, func(i, j int) bool { return list[i].Endpoint < list[j].Endpoint })
+	return json.NewEncoder(stdout).Encode(struct {
+		Version int     `json:"version"`
+		Entries []entry `json:"entries"`
+	}{1, list})
 }

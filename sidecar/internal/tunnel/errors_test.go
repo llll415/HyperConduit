@@ -13,6 +13,7 @@ import (
 
 	coreerrors "github.com/apernet/hysteria/core/v2/errors"
 	"github.com/apernet/quic-go"
+	"github.com/llll415/HyperConduit/sidecar/internal/trust"
 )
 
 // timeoutTestError is a net.Error whose Timeout method reports true.
@@ -53,6 +54,8 @@ func TestClassifyErrorCodes(t *testing.T) {
 		{"x509 certificate invalid", x509.CertificateInvalidError{}, CodeTLS},
 		{"tls verification pointer", &tls.CertificateVerificationError{}, CodeTLS},
 		{"core auth", coreerrors.AuthError{StatusCode: 401}, CodeAuthentication},
+		{"changed identity", &trust.ChangedError{}, CodeIdentity},
+		{"trust storage", &trust.StorageError{Err: errors.New("private")}, CodeStorage},
 		{"core config", coreerrors.ConfigError{Field: "token", Reason: "missing"}, CodeConfig},
 		{"core dial", coreerrors.DialError{Message: "private backend"}, CodeTarget},
 		{"quic stream limit value", quic.StreamLimitReachedError{}, CodeLimit},
@@ -219,6 +222,8 @@ func TestErrorDescriptions(t *testing.T) {
 	}{
 		{CodeConfig, "invalid configuration"},
 		{CodeTLS, "TLS verification failed"},
+		{CodeIdentity, "server identity changed"},
+		{CodeStorage, "identity or trust storage unavailable"},
 		{CodeAuthentication, "authentication failed"},
 		{CodeTimeout, "operation timed out"},
 		{CodeCanceled, "operation canceled"},

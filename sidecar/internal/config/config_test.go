@@ -273,8 +273,8 @@ func TestNormalizeServerInvalid(t *testing.T) {
 		{name: "target wildcard ipv6", cfg: with(valid, func(c *Config) { c.Target = "[::]:25565" }), wantField: "target"},
 		{name: "target without port", cfg: with(valid, func(c *Config) { c.Target = "example.com" }), wantField: "target"},
 
-		{name: "missing cert file", cfg: with(valid, func(c *Config) { c.CertFile = "" }), wantField: "certFile"},
-		{name: "missing key file", cfg: with(valid, func(c *Config) { c.KeyFile = "" }), wantField: "keyFile"},
+		{name: "missing cert file", cfg: with(valid, func(c *Config) { c.CertFile = "" }), wantField: "certFile/keyFile"},
+		{name: "missing key file", cfg: with(valid, func(c *Config) { c.KeyFile = "" }), wantField: "certFile/keyFile"},
 		{name: "ca file set", cfg: with(valid, func(c *Config) { c.CAFile = "ca.pem" }), wantField: "caFile"},
 		{name: "server name set", cfg: with(valid, func(c *Config) { c.ServerName = "example.com" }), wantField: "serverName"},
 
