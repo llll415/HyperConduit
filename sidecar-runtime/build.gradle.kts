@@ -7,6 +7,10 @@ plugins {
 dependencies {
     compileOnly("com.google.code.gson:gson:2.10.1")
     testImplementation("com.google.code.gson:gson:2.10.1")
+    compileOnly("io.netty:netty-transport:4.1.97.Final")
+    compileOnly("io.netty:netty-codec:4.1.97.Final")
+    testImplementation("io.netty:netty-transport:4.1.97.Final")
+    testImplementation("io.netty:netty-codec:4.1.97.Final")
 }
 
 val hostOs = when {

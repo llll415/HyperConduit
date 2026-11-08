@@ -113,11 +113,12 @@ func (c *ownedConn) Close() error {
 }
 
 type fixedOutbound struct {
-	ctx     context.Context
-	target  string
-	timeout time.Duration
-	conns   *connSet
-	status  *statusStore
+	ctx         context.Context
+	target      string
+	timeout     time.Duration
+	conns       *connSet
+	status      *statusStore
+	bridgeToken string
 }
 
 func (o *fixedOutbound) TCP(request string) (net.Conn, error) {
@@ -155,6 +156,17 @@ func (o *fixedOutbound) dial(ctx context.Context, request string) (net.Conn, err
 	owned, ok := o.conns.add(c)
 	if !ok {
 		return nil, net.ErrClosed
+	}
+	if o.bridgeToken != "" {
+		info, present := observe.StreamFromContext(ctx)
+		if !present {
+			_ = owned.Close()
+			return nil, &Error{Code: CodeTarget, Op: "bridge"}
+		}
+		if err := writeBridgePreface(ctx, owned, o.bridgeToken, info); err != nil {
+			_ = owned.Close()
+			return nil, classifyError("bridge", err)
+		}
 	}
 	if o.status != nil {
 		id := o.status.addBinding(c.LocalAddr().String(), c.RemoteAddr().String())

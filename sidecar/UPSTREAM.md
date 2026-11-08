@@ -96,3 +96,11 @@ git rev-parse 832a525:sidecar/hy2-core
 - Windows 本机：Java runtime 48 项（47 通过、1 POSIX 用例跳过），原 Java core 171 项、mod-common 2 项通过，NeoForge jar 构建成功。
 - Go sidecar 338 个测试/子测试通过，1 Unix 权限用例跳过，0 失败；`go vet` 通过。报告：临时目录 `opencode/hyperconduit-sidecar-step5-tests.jsonl`。
 - 覆盖真实进程启动/传输/关闭、父 JVM 强杀后 EOF 清理、私有临时配置与端口占用。MC 仍未接入；完整跨平台资源矩阵待第 10 步。
+
+## 第 6 步集成记录
+
+- core 未修改；调用方新增可选私有 MC 前言 `HCMETA01 + uint32长度 + JSON`。凭据是 Java 每监听随机生成的 32 字节值，与玩家 token 分离；普通独立转发不配置时不写前言。
+- 前言中的来源、连接 ID、stream ID 只取服务端 QUIC 上下文。Java 在私有 loopback listener 验证后才安装 MC 管线并交付游戏字节，不在公网 TCP 信任来源头。
+- `serverEndpoint` 将用户选择的信任端点与解析后的网络目标分开；MC 握手不使用桥接地址。
+- Windows 本机启动 NeoForge 1.21.1：共存 TCP/QUIC status 及仅隧道 QUIC status 通过；仅隧道普通 TCP 不可用；两次使用 RCON stop 正常关闭。未完成真实客户端登录、跑图、LAN 或公网验证。
+- 自动回归：Java runtime 60 通过/1 POSIX 跳过、mod-common 26 通过、旧 core 171 通过；Go sidecar 364 个测试/子测试通过、1 Unix 权限用例跳过、0 失败，静态检查和依赖校验通过。报告位于本机临时目录 `opencode/hyperconduit-sidecar-step6-tests.jsonl`。

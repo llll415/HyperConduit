@@ -22,6 +22,9 @@ dependencies {
 
     testImplementation(project(":core"))
     testImplementation("com.google.code.gson:gson:2.10.1")
+    // Minecraft supplies Netty at runtime. Tests that build a real Bootstrap/EmbeddedChannel need
+    // the same version on the test classpath without packaging it.
+    testImplementation("io.netty:netty-transport:4.1.97.Final")
 }
 
 neoForge {

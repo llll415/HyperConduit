@@ -23,6 +23,24 @@ neoForge {
         minecraftVersion = "1.21.1"
         mappingsVersion = "2024.11.17"
     }
+
+    runs {
+        create("server") {
+            server()
+            programArgument("--nogui")
+            gameDirectory = layout.projectDirectory.dir("run-server")
+            systemProperty("mixin.debug.export", "true")
+        }
+    }
+
+    mods {
+        create("hyperconduit") {
+            sourceSet(sourceSets.main.get())
+            sourceSet(project(":mod-common").sourceSets.main.get())
+            sourceSet(project(":sidecar-runtime").sourceSets.main.get())
+            sourceSet(project(":core").sourceSets.main.get())
+        }
+    }
 }
 
 // Bundle shared modules into the NeoForge jar by unpacking their contents, so the mod is a

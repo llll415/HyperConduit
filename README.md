@@ -1,230 +1,138 @@
 # HyperConduit
 
-> **声明**
+HyperConduit 是面向 **Minecraft 1.21.1 / NeoForge 21.1.252 / Java 21** 的双端 UDP 隧道 Mod。它把 Minecraft 原有的 Netty 字节流交给随 jar 分发的 Go Hysteria 2 sidecar，由 sidecar 建立加密 QUIC/UDP 隧道；Minecraft 的登录、认证、白名单和其他上层逻辑仍由原版处理。
+
+> 当前是开发分支，不是可分发版本。
 >
-> - **个人自娱自乐项目**：本项目纯属个人的奇思妙想，做出来自己玩玩和验证思路。非严肃工业级产品，不喜勿喷。
-> - HyperConduit 是一个仍在验证中的 **Vibe Coding** 项目，不是经过完整安全审计或大规模生产验证的网络产品。请先在可控环境测试，并保留原版 TCP 回退。
-> - **尚未经过充分真实公网验证**：本项目尚未在跨运营商、跨境、晚高峰或运营商 QoS 等复杂公网环境中进行充分实测。不同网络对 UDP 的策略差异很大，**不保证抗 QoS、抗丢包、吞吐、延迟或游戏体验会有任何改善**；在某些网络上甚至可能更差。
-> - 本项目参考 Hysteria 2 的 Brutal 思路：当确认率下降时，`Brutal` 会在严格上限内提高发送速率，尝试补偿丢包。这是一种偏激进的发包策略；错误设置带宽、共享网络使用，或遇到运营商对 UDP/异常流量的策略时，可能影响同网络中的其他业务，也可能触发限速、丢包或阻断。使用者应自行承担相应网络风险。
-> - 这里的 **QUIC-like** 与 **Brutal-like** 表示“参考相关机制自行实现”，**不是 RFC 9000 QUIC 实现**，也不与浏览器 QUIC、HTTP/3 或其他通用 QUIC 端点互通。
+> 只支持 NeoForge 1.21.1 + Java 21。Go sidecar 已随 jar 打包，但当前只包含构建机平台的二进制；完整平台矩阵属于第 10 步。
 
-HyperConduit 是面向 **Minecraft 1.21.1 NeoForge** 的双端 UDP 隧道 Mod。它把 Minecraft 已有的 Netty 字节流管线承载到自定义的可靠 UDP 传输中；Minecraft 游戏协议、登录与认证流程、白名单、封禁及其他上层服务端逻辑仍由原版处理。
+## 兼容性与迁移
 
-当前版本：**Minecraft 1.21.1 / NeoForge 21.1.252 / Java 21**。
+- 本分支重构了传输核心，使用新的配置和隧道协议。
+- **不兼容旧版 `hyperconduit.json`、旧版 Mod 或旧协议**，不提供配置迁移或双协议兼容层。
+- 旧 Java lite `core/` 已不再是实际入口，但源码暂时保留，计划第 9 步清理。
+- 客户端与服务端必须安装同版本 Mod 并启用；条件不满足时**不会自动回退**，连接直接失败并显示错误。
+- 未安装 Mod 的玩家仍可通过原版 TCP 加入（服务端保持 `disableVanillaTcp=false`）。
+- 玩家仍填写服务器地址 `host:port`；不需要域名、CA 证书或手动启动 sidecar。
+- MC 握手地址、端口和服务器列表显示信息保持原样；原有认证流程也保持不变。
 
-## 它做什么
+## 工作方式
 
-- 客户端和服务端均启用后，Minecraft 连接通过 HyperConduit 的加密可靠 UDP 隧道传输。
-- 默认关闭。关闭时客户端保留原版 TCP 连接方式。
-- 不需要填写 PSK、单独的隧道地址或监听地址：客户端直接使用服务器列表中的 `host:port`。
-- 服务端可让原版 TCP 与 HyperConduit UDP 使用同一个端口号共存；也可选择仅接受 HyperConduit 连接。
-- 提供游戏内配置入口、F3 链路状态、`/hyperconduit status` 和服务端 `watch` 监控。
-- 当前只支持 NeoForge；Fabric 尚未实现。
+- Java 端只负责配置、生命周期、拨号重定向和可信来源恢复。
+- 客户端连接时先启动本机 sidecar，再把 Minecraft 的 TCP 连接指向 sidecar 输出的回环监听地址。
+- 服务端启动时创建私有 TCP backend，并让 sidecar 通过 UDP 接收隧道流量后转发到该 backend。
+- 服务端同时保留原版 TCP listener（共存形态）时，两条路径使用同一个数字端口，但协议分别是 TCP 与 UDP。
+- 所有隧道失败都作为显式错误返回，不会静默切回原版 TCP。
 
-## 安装与使用
+## 使用
 
-1. 客户端与服务端安装相同版本的 `hyperconduit-neoforge-0.1.1.jar`。
-2. 启动游戏后，在**多人游戏**或**开放局域网联机**界面点击 `HyperConduit…`。
-3. 打开“启用”，设置本端发送带宽与控制模式；默认是 `10 Mbps + Brutal`。
-4. 玩家仍像原版一样填写服务器 IP 和端口加入。无需额外部署代理或填写密钥。
+1. 两端安装同一版本的 `hyperconduit-neoforge-*.jar`。
+2. 在多人游戏或“开放局域网”界面点击 `HyperConduit…`。
+3. 打开“启用”，按需设置带宽、拥塞控制和 token。
+4. 正常添加并加入服务器。
+5. 设置保存后只在下一次连接或下一次开放局域网时生效，不会热切换已建立的会话。
 
-设置保存后，只会在**下一次连接**或**下一次开放局域网**时应用；不会热切换已经建立的会话。
+## 配置
 
-### 连接要求与兼容性
+配置文件为 `config/hyperconduit-hy2.json`，使用严格 JSON；旧的 `hyperconduit.json` 会被忽略。
 
-- 隧道需要**客户端和服务端都安装并启用** HyperConduit。
-- 服务器默认 `disableVanillaTcp=false`：未安装 Mod 的玩家仍可通过原版 TCP 加入；启用 Mod 的玩家使用 UDP 隧道。TCP 与 UDP 是不同传输协议，因此可使用同一端口号。
-- 服务端若设置 `disableVanillaTcp=true`，将不再创建原版 TCP listener，只接受 HyperConduit UDP 会话。
-- 单人游戏与本地回路连接不经过 HyperConduit；客户端也不会用隧道连接 `localhost`、loopback 或 wildcard 地址。
+| 字段 | 默认 | 说明 |
+| --- | --- | --- |
+| `enabled` | `false` | 本端是否启用隧道；关闭时走原版 TCP。 |
+| `upMbps` / `downMbps` | `0` | 客户端：上传/下载声明；服务端：单连接 Brutal 发送/接收上限。`0` 不声明限额，不限制 BBR/Reno。 |
+| `congestion` | `bbr` | `bbr` 或 `reno`。 |
+| `disableBrutal` | `false` | 仅主机生效：双向改用本地 BBR/Reno，不拒绝连接。 |
+| `disableVanillaTcp` | `false` | 仅主机生效：只接受隧道连接。 |
+| `clientToken` / `serverToken` | 空 | 可选共享 token；默认免 token。 |
+| `connectTimeoutMs` | `5000` | 连接超时，100–120000 毫秒。 |
+| `maxConnections` | `64` | 最大并发连接数，1–4096。 |
 
-## 控制模式：Brutal 与 Paced
+游戏内 token 输入框不会回显已保存值，显示为掩码；留空表示保持原值。旁边提供“清除客户端口令 / 清除服务器口令”按钮，可显式清空。
 
-带宽配置是**逐方向、按本端发送侧**生效的：
+## 服务端形态
 
-- 服务端的 `mbps` 控制服务端 → 玩家方向；
-- 客户端的 `mbps` 控制玩家 → 服务端方向；
-- 它是人工配置的目标发送速率，不是链路容量自动探测值。请按自己的上行、下行和共享网络情况谨慎设置。
+### 共存（默认）
 
-| 模式 | 目标带宽 | 起搏器 | 丢包补偿 | 如何选择 |
-| --- | --- | --- | --- | --- |
-| **Brutal**（默认） | 使用配置的 `mbps` | 使用 | 开启，有严格上限 | 已确认链路存在非拥塞性丢包，且接受为保持交付率而额外发包时使用。 |
-| **Paced** | 使用配置的 `mbps` | 使用 | 关闭 | 希望固定按配置速率发送，不希望因为丢包提高实际发送速率时使用。 |
+服务端同时提供同号的原版 TCP 和 HyperConduit UDP 端口。隧道转发到额外的本机随机 TCP 入口；原版 TCP 继续服务未安装 Mod 的玩家。
 
-### Brutal
+### only-tunnel
 
-`Brutal` 是 HyperConduit 对 Hysteria 2 Brutal 思路的 Java 实现与裁剪。它不会像 Reno/CUBIC 一样在发现丢包时做传统的乘法减窗；而是以配置带宽为基准，根据最近确认包与丢失包的比例做**有限补偿**，以提高接收端的有效交付率。
+设置 `disableVanillaTcp=true` 后，对外只接受 HyperConduit UDP，MC 的私有 TCP 入口仍保留。该模式要求固定对外端口，**端口 0 不受支持**。LAN 共用同一监听生命周期，但尚未实际联机验证。
 
-这不意味着它保证带宽或保证低延迟。若配置速率超过真实可用容量，或路径本身确实拥塞，Brutal 仍可能制造更多排队、重传和丢包。请从保守值开始测试。
+每个监听器都会在内部生成随机的 bridge token，并随受保护的元数据一起传给私有 backend。该 token 只用于本机 Java 与 sidecar 之间的桥接，玩家无需配置，也不应配置 `bridgeToken`。
 
-### Paced
+## 来源地址与兼容风险
 
-`Paced` 仍然使用相同的可靠重传层与令牌桶起搏器，只是关闭 Brutal 的丢包补偿：它始终以配置的目标速率起搏发送。
+sidecar 在转发前写入受保护的 `HCMETA01` 元数据（bridge token、peer、connectionId、streamId）；Java 端校验后通过 `Connection.getRemoteAddress` 恢复玩家来源地址。这样不会把 Minecraft 载荷里的任意字段当作真实来源。
 
-`Paced` **不是** Reno、CUBIC、BBR，也不是标准 QUIC 的默认拥塞控制算法；它是本项目内部“固定目标速率 + 起搏、无丢包补偿”的模式。
+但部分 Mod 直接读取 Netty `channel.remoteAddress()` 时仍会看到 loopback，而不是真实玩家地址。这类 Mod 可能表现异常，属于当前已知兼容风险。
 
-## 配置与身份信任
+## 身份与信任
 
-常规设置建议在游戏内 `HyperConduit…` 界面修改。配置文件位于 `config/hyperconduit.json`：
+- 服务端首次运行生成长期身份，保存在 `config/hyperconduit/server-identity.json`，其中包含私钥。
+- 客户端首次连接某个 `host:port` 时，按 SPKI TOFU 信任服务端公钥，记录在 `config/hyperconduit/known-servers.json`。
+- 信任库由同一个 Go sidecar 持久化和读写，Java 不另存一份指纹。
+- 同一地址后续出现不同身份时客户端拒绝连接，不会静默覆盖。
+- 可在 `HyperConduit… → 已信任服务器…` 查看列表并删除（forget）旧记录；删除后下一次连接会重新执行首次信任。
+- 首次信任仍存在中间人风险；需要更强保证时应通过带外方式核对指纹。
 
-```json
-{
-  "enabled": false,
-  "mbps": 10,
-  "brutal": true,
-  "disableVanillaTcp": false,
-  "receiveWindowBytes": 4194304,
-  "sendBufferBytes": 4194304
-}
-```
+## 状态与诊断
 
-| 字段 | 含义 |
-| --- | --- |
-| `enabled` | 是否启用本端 HyperConduit；默认 `false`，关闭时为原版 TCP。 |
-| `mbps` | 本端单向目标发送带宽，单位 Mbps。 |
-| `brutal` | `true` 为 Brutal；`false` 为 Paced。 |
-| `disableVanillaTcp` | 仅服务端监听策略：`true` 时不接受原版 TCP。 |
-| `receiveWindowBytes` | 传输层接收流控窗口，默认 4 MiB。 |
-| `sendBufferBytes` | 应用数据待发送缓冲上限，默认 4 MiB。 |
+- `F3` 当前只显示连接状态和配置摘要，**不是实际 RTT、丢包或速率指标**；实际指标接入属于第 8 步。
+- `/hyperconduit status` 显示状态。
+- 服务端支持 `/hyperconduit watch` 和 `/hyperconduit watch stop`。
+- 多人服务器列表的 HyperConduit 探测图标尚未实现（第 7 步），因此不要根据列表图标判断对方是否安装或启用。
 
-### 无 PSK 与首次信任
+## 已验证范围
 
-HyperConduit 不要求玩家手工维护 PSK：
+- 专用服务端 smoke：共存形态已通过。
+- only-tunnel 形态的 Minecraft status 已通过。
+- 尚未验证玩家实际进服跑图、局域网完整流程、公网复杂网络和跨平台运行。
 
-- 服务端首次运行时自动生成长期 X25519 身份并保存到 `config/hyperconduit-server-identity.json`。
-- 客户端首次连接一个 `host:port` 时，采用 TOFU（首次使用即信任）保存服务端公钥指纹到 `config/hyperconduit-known-servers.json`。
-- 同一地址后续出现不同身份时，客户端不会静默替换记录，会拒绝连接。可在 `HyperConduit… → 已信任服务器…` 中查看并删除旧记录；删除后下一次连接会重新执行首次信任。
+## 实现边界
 
-## 状态与命令
+- sidecar 基于定制 HY2 core 和 apernet/quic-go，每条 MC TCP 连接对应一条有序 QUIC stream。
+- 使用成熟 QUIC/TLS 实现，不自行实现 QUIC；保留 HTTP/3 鉴权，不承诺与原版 HY2 的产品互通。
+- 不提供应用层 UDP 转发；Minecraft 的 UDP 查询等能力不在隧道范围内。
+- 服务端只连接管理员配置的固定 target，客户端不能指定任意目标。
+- bridge 元数据只接受 sidecar 的可信观测，不接受 Minecraft 载荷自报。
+- 本项目不提供流量伪装或规避网络识别的能力。
 
-客户端按 `F3` 可看到类似以下的 HyperConduit 状态行：
+## 常见问题
 
-```text
-[HyperConduit] [运行中] [Brutal 10 Mbps]
-[链路] RTT 12ms  p95(10s) 24ms  丢包(10s) 0.0%  重传 0.0/s
-[速率] ↓ 937 B/s  ↑ 32 B/s  抖动(10s) 1ms
-```
+- **连接直接失败**：先确认两端都已启用，且服务端 UDP 端口可达；失败不会回退到 TCP。
+- **未装 Mod 的玩家能否加入**：服务端保持共存形态时可以走原版 TCP。
+- **能否只开隧道**：可以，设置 `disableVanillaTcp=true`，但必须提供固定端口，不能用端口 0。
+- **为什么列表没有 HC 图标**：探测图标尚未实现，不能据此判断支持状态。
+- **为什么 F3 没有 RTT**：当前只显示状态与配置，实际指标属于第 8 步。
+- **为什么来源 IP 是 127.0.0.1**：部分直接读 Netty `remoteAddress` 的 Mod 会看到 loopback，这是已知兼容风险。
+- **换服务端后连不上**：新身份会触发信任拒绝；在“已信任服务器”中删除旧记录后重试。
+- **首次连接安全吗**：TOFU 只能防后续身份变化，首次连接仍可能被中间人攻击。
 
-- `↓`、`↑` 与 `重传` 是时间常数 0.5 秒的平滑实时值；
-- `丢包(10s)`、`p95(10s)` 与 `抖动(10s)` 使用最近十秒窗口；
-- 丢包显示达到 2.5% 时为红色，重传大于 0 时为黄色。
+## 构建
 
-命令使用完整名称：
-
-```text
-/hyperconduit status
-```
-
-- 客户端执行：显示与客户端 F3 同源的本机状态。
-- 服务端或控制台执行：显示所有玩家的隧道、原版 TCP、本地连接统计及隧道汇总。
-
-服务端可开启持续观察：
-
-```text
-/hyperconduit watch
-/hyperconduit watch stop
-```
-
-`watch` 每 20 个服务器 tick（通常约一秒）输出一次状态。
-
----
-
-# 技术说明
-
-下面内容面向希望了解实现边界的读者。HyperConduit 的协议、密码学和拥塞控制代码位于 `:core`；它没有依赖 Minecraft API，也不引入第三方通用 QUIC 协议栈。实现参考 QUIC / quic-go 的可靠 UDP 机制及 Hysteria 2 的 Brutal、Pacer 设计，再以 Java 21 实现并按 Minecraft 单字节流场景裁剪。
-
-## QUIC-like 的边界
-
-HyperConduit 是自定义的单字节流可靠 UDP 协议，借鉴了 QUIC 的 Connection ID、包号确认区间、RTT/PTO、基于包号与时间阈值的丢包检测及流控机制；它**不是** RFC 9000 wire format：
-
-- 一个 `SessionEngine` 只承载一个有序字节流，不实现多流复用、HTTP/3 或标准 QUIC 互操作；
-- 每名玩家对应独立 Session，拥有独立的拥塞控制器与 Pacer；
-- 建立后数据包使用自定义的 4 字节明文 CID、flags、32 位 packet number 和 AEAD 密文负载；
-- 建立前的 v2 握手使用独立明文 envelope（魔数、版本、类型、CID、Cookie/载荷长度），不与建立后的传输包格式混用。
-
-### 可靠传输与流控
-
-建立后的传输帧在 ChaCha20-Poly1305 AEAD 保护下编码：
-
-- `StreamData(offset, data)`：用绝对字节偏移承载数据。接收端缓存乱序片段、忽略重复片段，只有填补缺口后才按顺序交付；
-- `Ack(ackDelayMicros, ranges)`：以区间/gap 形式确认包号集合；
-- `MaxData(maxOffset)`：接收方授予的最高可发送字节偏移，实现接收窗口流控；
-- `Ping()`：ack-eliciting 探测帧；
-- `Close(reasonCode, message)`：传输层关闭帧。
-
-发送端以两种阈值判定丢包：包号阈值为 3；时间阈值为 `9 / 8 × max(latest RTT, smoothed RTT)`。已判丢失的 `StreamData`、`MaxData` 和 `Close` 会排入重传队列。PTO 超时会提供探测发送机会；若没有其他可用的 ack-eliciting 帧，则发送 `Ping` 请求 ACK。
-
-### 传输包保护
-
-传输包的 CID 保持明文，供服务端在解密前定位 Session。flags 与 packet number 使用基于 `HMAC-SHA256(maskKey, body)` 的前 5 字节进行异或掩码；原始未掩码头部作为 AEAD AAD 参与认证。此处的掩码是协议实现细节，不承诺规避任意网络识别或策略系统。
-
-## Brutal-like 的实现细节
-
-`BrutalCc` 的目标不是估测或探测链路容量，而是以用户配置的 `bps`（每秒字节数）为锚点。其公式为：
-
-```text
-               bps × sRTT × 2
-cwnd      = ───────────────────
-                   ackRate
-
-                 bps
-paceRate = ───────────
-              ackRate
-```
-
-- 在五个一秒时间槽中累计确认包数与丢失包数；
-- 总样本数少于 50 时，固定 `ackRate = 1.0`，避免冷启动时由少量样本触发补偿；
-- 正常情况下 `ackRate` 最低为 `0.8`，因此补偿上限为配置速率的 `1 / 0.8 = 1.25` 倍；
-- `brutal=false` 时仍使用 `BrutalCc` 与同一 Pacer，但固定 `ackRate = 1.0`，即 Paced 模式。
-
-### Pacer
-
-`Pacer` 参考 Hysteria 的 common pacer 设计，使用令牌桶预算决定“现在是否可发送”及“下一次可发送的等待时间”。它限制连续突发额度，并按当前 pacing rate 补充预算。
-
-内部时间以纳秒值计算，但实现的最小起搏延迟是 **1 ms**；请不要把它理解为微秒级或硬实时调度器。
-
-## 安全与握手
-
-密码学实现仅使用 JDK 21 原语：X25519、ChaCha20-Poly1305、HKDF-SHA256 与 HMAC-SHA256。握手模式为：
-
-```text
-Noise_XX_25519_ChaChaPoly_SHA256
-
--> e
-<- e, ee, s, es
--> s, se
-```
-
-实际连接先经过无状态 Retry：客户端首次 Initial 不携带有效 Cookie，服务端返回 Cookie；客户端回显合法 Cookie 后，服务端才分配 Session 并执行 Noise 工作。Cookie 绑定源 IP、源 UDP 端口、CID 与过期时间，HMAC 密钥保留当前和上一代并定期轮换。这样可减少伪造 UDP Initial 触发会话分配和昂贵密钥协商的机会。
-
-Noise XX 完成后为两个方向派生独立传输密钥；客户端会在发送最后一个握手消息前验证服务端静态身份，从而实现上文所述的 TOFU 信任流程。
-
-## 工程结构与构建
-
-- `:core`：纯 Java 传输、帧编解码、Noise XX、流控、重传、Pacer 与拥塞控制；包含确定性模拟链路、UDP loopback 和 Netty 集成测试。
-- `:mod-common`：配置、身份信任、跨端 Mixin 与通用适配逻辑。
-- `:neoforge`：NeoForge 平台入口、GUI、F3 状态与指令。
-
-使用 JDK 21 构建：
+需要 JDK 21 与 **Go 1.26**：
 
 ```bash
-./gradlew :core:test :mod-common:test :neoforge:jar
+./gradlew :neoforge:jar -PsidecarGo=<go 可执行文件路径>
 ```
 
-产物路径：
+jar 会打包当前构建机平台的 sidecar 二进制、版本及 SHA-256 manifest。Windows/Linux/macOS 的完整构建矩阵、执行权限与 smoke test 属于第 10 步。
 
-```text
-neoforge/build/libs/hyperconduit-neoforge-x.x.x.jar
-```
+## 风险提示
 
-## 参考项目
+- 跨境使用可能遇到阻断、限速或合规风险；本项目不提供伪装、抗审查或规避策略保证。
+- 不保证吞吐、延迟、抗丢包或游戏体验会改善，部分网络中可能更差。
+- Brutal 偏激进；带宽设置过高或在共享网络、多连接场景使用，可能影响其他业务并触发限速。请从保守值开始。
+- UDP 可能被运营商或网络策略阻断；隧道失败时不会自动切回原版 TCP。
 
-HyperConduit 没有将下列项目作为运行时库引入，也不与其协议直接互通；这里记录的是本项目在自行实现时参考的公开设计与算法来源。
+## 后续步骤
 
-- [Hysteria 2](https://github.com/HyNetworks/hysteria)
-  - 参考其 **Brutal** 拥塞控制思路与公式：按配置目标速率，以近期 ACK / Loss 比例计算有界丢包补偿；
-  - 参考其 `internal/congestion/common/pacer.go` 的令牌桶 Pacer 设计：发包预算、最小起搏延迟与突发额度限制；
-  - HyperConduit 将这些设计以 Java 21 重写为 `BrutalCc` 与 `Pacer`，并针对单 Minecraft 字节流会话接入自己的可靠 UDP 状态机。
+- 第 7 步：多人列表探测与 HC 图标。
+- 第 8 步：F3 与命令接入实际连接指标。
+- 第 9 步：裁剪旧 Java 核并清理。
+- 第 10 步：跨平台打包、完整验证与文档收尾。
 
-- [quic-go](https://github.com/HyNetworks/quic-go)
-  - 参考其 QUIC 传输层的参数与可靠性设计：初始数据报尺寸、ACK 区间表示、平滑 RTT / ACK delay 处理、基于包号及时间阈值的丢包检测、PTO 探测与 Pacer 行为；
-  - HyperConduit 使用自定义 packet、frame 与握手格式实现这些机制，只保留 Minecraft 所需的单有序字节流；不实现 RFC 9000 wire format、多流复用、HTTP/3 或标准 QUIC 互操作。
+## 许可证与第三方
+
+sidecar 的第三方来源与许可证见 [sidecar/THIRD_PARTY_NOTICES.md](sidecar/THIRD_PARTY_NOTICES.md)、[sidecar/licenses/](sidecar/licenses/)、[sidecar/UPSTREAM.md](sidecar/UPSTREAM.md) 和 [sidecar/hy2-core/LICENSE.md](sidecar/hy2-core/LICENSE.md)。构建时这些文件也会放入 jar 的 `META-INF/hyperconduit-sidecar`。

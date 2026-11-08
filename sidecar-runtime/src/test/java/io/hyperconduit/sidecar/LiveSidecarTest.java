@@ -13,6 +13,9 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.Map;
+import java.util.HexFormat;
+import java.security.SecureRandom;
+import java.io.DataInputStream;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.ExecutionException;
 
@@ -106,5 +109,48 @@ class LiveSidecarTest {
             Thread.sleep(10);
         }
         fail("Private launch configuration remained after exit");
+    }
+
+    @Test void bridgePrefaceCarriesAuthenticatedPeerBeforePayload() throws Exception {
+        Path binary = new BinaryExtractor().extract(directory.resolve("bin"));
+        byte[] secret = new byte[32];
+        new SecureRandom().nextBytes(secret);
+        String token = HexFormat.of().formatHex(secret);
+        try (ServerSocket backend = new ServerSocket(0, 16, java.net.InetAddress.getByName("127.0.0.1"))) {
+            var received = new java.util.concurrent.CompletableFuture<com.google.gson.JsonObject>();
+            Thread.ofVirtual().start(() -> {
+                try (Socket socket = backend.accept()) {
+                    socket.setSoTimeout(5000);
+                    DataInputStream input = new DataInputStream(socket.getInputStream());
+                    assertEquals("HCMETA01", new String(input.readNBytes(8), StandardCharsets.US_ASCII));
+                    int length = input.readInt();
+                    assertTrue(length > 0 && length <= 1024);
+                    var metadata = com.google.gson.JsonParser.parseString(new String(input.readNBytes(length), StandardCharsets.UTF_8)).getAsJsonObject();
+                    byte[] payload = input.readNBytes(4);
+                    socket.getOutputStream().write(payload);
+                    socket.getOutputStream().flush();
+                    received.complete(metadata);
+                } catch (Throwable failure) { received.completeExceptionally(failure); }
+            });
+            Path serverConfig = write("bridge-server.json", Map.of("target", "127.0.0.1:" + backend.getLocalPort(),
+                    "stateDir", directory.resolve("state").toString(), "bridgeToken", token));
+            try (SidecarProcess server = SidecarProcess.start(binary, "server", serverConfig, directory, Duration.ofSeconds(8), Duration.ofSeconds(2))) {
+                var udp = server.ready().get(10,TimeUnit.SECONDS).listen();
+                Path clientConfig = write("bridge-client.json",Map.of("server","127.0.0.1:"+udp.getPort(),"stateDir",directory.resolve("state").toString()));
+                try (SidecarProcess client = SidecarProcess.start(binary,"client",clientConfig,directory,Duration.ofSeconds(8),Duration.ofSeconds(2))) {
+                    var tcp = client.ready().get(10,TimeUnit.SECONDS).listen();
+                    try (Socket socket = new Socket(tcp.getAddress(),tcp.getPort())) {
+                        socket.setSoTimeout(5000);
+                        socket.getOutputStream().write(new byte[]{1,2,3,4});
+                        assertArrayEquals(new byte[]{1,2,3,4},socket.getInputStream().readNBytes(4));
+                    }
+                    var meta = received.get(5,TimeUnit.SECONDS);
+                    assertEquals(token,meta.get("token").getAsString());
+                    assertTrue(meta.get("peer").getAsString().startsWith("127.0.0.1:"));
+                    assertTrue(meta.get("connectionId").getAsLong()>0);
+                    assertTrue(meta.get("streamId").getAsLong()>=0);
+                }
+            }
+        }
     }
 }

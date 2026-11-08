@@ -1,13 +1,12 @@
 package io.hyperconduit.neoforge;
 
 import com.mojang.brigadier.Command;
-import io.hyperconduit.conn.RollingMetrics;
-import io.hyperconduit.conn.SessionStats;
 import io.hyperconduit.mod.config.ConfigHolder;
 import io.hyperconduit.mod.config.HyperConduitConfig;
-import io.hyperconduit.netty.HyperConduitServerChannel;
-import io.hyperconduit.netty.HyperConduitServerChildChannel;
+import io.hyperconduit.sidecar.TunnelAttributes;
 import io.netty.channel.Channel;
+import io.netty.channel.local.LocalChannel;
+import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.commands.Commands;
 import net.minecraft.network.chat.Component;
 import net.minecraft.server.MinecraftServer;
@@ -18,16 +17,16 @@ import net.neoforged.neoforge.event.server.ServerStoppingEvent;
 import net.neoforged.neoforge.event.tick.ServerTickEvent;
 import net.neoforged.fml.common.EventBusSubscriber;
 
+import java.net.InetSocketAddress;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Locale;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
 @EventBusSubscriber(modid = "hyperconduit")
 public final class HyperConduitServerEvents {
 
-    private static final Set<net.minecraft.commands.CommandSourceStack> WATCHERS = ConcurrentHashMap.newKeySet();
+    private static final Set<CommandSourceStack> WATCHERS = ConcurrentHashMap.newKeySet();
     private static int watchTicks;
 
     private HyperConduitServerEvents() {
@@ -35,12 +34,15 @@ public final class HyperConduitServerEvents {
 
     @SubscribeEvent
     public static void onServerStopping(ServerStoppingEvent event) {
-        HyperConduitServerChannel.beginGracefulShutdownAll();
+        // The listener mixin owns the sidecar processes and backend sockets.
+        WATCHERS.clear();
+        watchTicks = 0;
     }
 
     @SubscribeEvent
     public static void registerCommands(RegisterCommandsEvent event) {
         event.getDispatcher().register(Commands.literal("hyperconduit")
+                .requires(source -> source.hasPermission(2))
                 .then(Commands.literal("status").executes(context -> sendStatus(context.getSource().getServer(),
                         context.getSource())))
                 .then(Commands.literal("watch").executes(context -> {
@@ -60,12 +62,12 @@ public final class HyperConduitServerEvents {
         if (++watchTicks < 20 || WATCHERS.isEmpty()) return;
         watchTicks = 0;
         List<String> lines = statusLines(event.getServer());
-        for (net.minecraft.commands.CommandSourceStack watcher : WATCHERS) {
+        for (CommandSourceStack watcher : WATCHERS) {
             for (String line : lines) watcher.sendSuccess(() -> Component.literal(line), false);
         }
     }
 
-    private static int sendStatus(MinecraftServer server, net.minecraft.commands.CommandSourceStack source) {
+    private static int sendStatus(MinecraftServer server, CommandSourceStack source) {
         for (String line : statusLines(server)) {
             source.sendSuccess(() -> Component.literal(line), false);
         }
@@ -78,56 +80,34 @@ public final class HyperConduitServerEvents {
         lines.add("[HyperConduit] 服务端 | " + configStatus(config));
         if (server == null) return lines;
 
-        long txRate = 0, rxRate = 0;
-        double retransRate = 0;
         int tunnels = 0, vanilla = 0, local = 0;
         for (ServerPlayer player : server.getPlayerList().getPlayers()) {
             Channel channel = player.connection.getConnection().channel();
-            if (channel instanceof io.netty.channel.local.LocalChannel) {
+            if (channel instanceof LocalChannel) {
                 local++;
                 continue;
             }
-            if (!(channel instanceof HyperConduitServerChildChannel tunnel)) {
+            if (!Boolean.TRUE.equals(channel.attr(TunnelAttributes.TUNNEL).get())) {
                 vanilla++;
                 continue;
             }
             tunnels++;
-            SessionStats stats = tunnel.stats();
-            RollingMetrics recent = stats.recent();
-            txRate += recent.txBytesPerSecond();
-            rxRate += recent.rxBytesPerSecond();
-            retransRate += recent.retransmitsPerSecond();
+            InetSocketAddress peer = channel.attr(TunnelAttributes.PEER).get();
             lines.add("§b[HyperConduit]§r §f[" + player.getGameProfile().getName() + "]§r"
-                    + " §fRTT §b" + ms(stats.smoothedRttNanos()) + "ms§r §7p95(10s) §f"
-                    + ms(recent.p95RttNanos()) + "ms§r " + lossTag(recent.lossRate()) + " "
-                    + retransTag(recent.retransmitsPerSecond()) + " §a↓ " + rate(recent.txBytesPerSecond())
-                    + "§r §b↑ " + rate(recent.rxBytesPerSecond()) + "§r");
+                    + " §a隧道§r §7源 " + sourceAddress(peer));
         }
-        lines.add("[HyperConduit] 总计 | 隧道 " + tunnels + " | 原版TCP " + vanilla + " | 本地 " + local
-                + " | 实时 ↓ " + rate(txRate) + " ↑ " + rate(rxRate)
-                + " | 实时重传 " + String.format(Locale.ROOT, "%.1f/s", retransRate));
+        lines.add("[HyperConduit] 总计 | 隧道 " + tunnels + " | 原版TCP " + vanilla + " | 本地 " + local);
         return lines;
+    }
+
+    private static String sourceAddress(InetSocketAddress peer) {
+        if (peer == null) return "未知";
+        return peer.getAddress() == null ? peer.getHostString() : peer.getAddress().getHostAddress();
     }
 
     private static String configStatus(HyperConduitConfig config) {
         if (config == null || !config.enabled) return "已禁用";
-        return "已启用 | " + (config.brutal ? "Brutal " : "Paced ") + config.mbps
-                + " Mbps | 原版TCP" + (config.disableVanillaTcp ? "禁止" : "允许");
-    }
-
-    private static long ms(long nanos) { return nanos / 1_000_000; }
-    private static String lossTag(double lossRate) {
-        return (lossRate >= 0.025 ? "§c" : "§8") + "丢包(10s) " + percent(lossRate) + "§r";
-    }
-    private static String retransTag(double retransmitsPerSecond) {
-        return (retransmitsPerSecond > 0 ? "§e" : "§8") + "重传 "
-                + String.format(Locale.ROOT, "%.1f/s", retransmitsPerSecond) + "§r";
-    }
-    private static String percent(double value) { return String.format(Locale.ROOT, "%.1f%%", value * 100); }
-    private static String rate(long bytesPerSecond) { return bytes(bytesPerSecond) + "/s"; }
-    private static String bytes(long value) {
-        if (value < 1024) return value + " B";
-        if (value < 1024 * 1024) return String.format(Locale.ROOT, "%.1f KiB", value / 1024.0);
-        return String.format(Locale.ROOT, "%.1f MiB", value / (1024.0 * 1024.0));
+        return "已启用 | " + (config.disableBrutal ? "Brutal 禁用" : "允许协商 Brutal")
+                + " | 原版TCP" + (config.disableVanillaTcp ? "禁止" : "允许");
     }
 }

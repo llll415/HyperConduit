@@ -1,12 +1,10 @@
 package io.hyperconduit.neoforge.client;
 
 import com.mojang.brigadier.Command;
-import io.hyperconduit.conn.RollingMetrics;
-import io.hyperconduit.conn.SessionStats;
-import io.hyperconduit.neoforge.HyperConduitServerEvents;
 import io.hyperconduit.mod.config.ConfigHolder;
 import io.hyperconduit.mod.config.HyperConduitConfig;
-import io.hyperconduit.netty.HyperConduitChannel;
+import io.hyperconduit.neoforge.HyperConduitServerEvents;
+import io.hyperconduit.sidecar.TunnelAttributes;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.components.Button;
 import net.minecraft.client.gui.screens.Screen;
@@ -23,7 +21,8 @@ import net.neoforged.neoforge.client.event.RegisterClientCommandsEvent;
 import net.neoforged.neoforge.client.event.ScreenEvent;
 import net.neoforged.fml.common.EventBusSubscriber;
 
-import java.util.Locale;
+import java.util.ArrayList;
+import java.util.List;
 
 @EventBusSubscriber(modid = "hyperconduit", value = Dist.CLIENT)
 public final class HyperConduitClientEvents {
@@ -52,21 +51,14 @@ public final class HyperConduitClientEvents {
             event.getLeft().addAll(HyperConduitServerEvents.statusLines(minecraft.getSingleplayerServer()));
             return;
         }
-        HyperConduitChannel channel = activeTunnel();
-        HyperConduitConfig config = ConfigHolder.get();
-        if (channel == null) {
-            String state = config != null && config.enabled ? "未建立隧道" : "已禁用";
-            event.getLeft().add("[HyperConduit] " + state);
-            return;
-        }
-        event.getLeft().addAll(clientStatusLines(channel, config));
+        event.getLeft().addAll(clientStatusLines(activeConnection(), ConfigHolder.get()));
     }
 
     @SubscribeEvent
     public static void registerClientCommands(RegisterClientCommandsEvent event) {
         event.getDispatcher().register(Commands.literal("hyperconduit")
                 .then(Commands.literal("status").executes(context -> {
-                    for (String line : clientStatusLines(activeTunnel(), ConfigHolder.get())) {
+                    for (String line : clientStatusLines(activeConnection(), ConfigHolder.get())) {
                         context.getSource().sendSuccess(() -> Component.literal(line), false);
                     }
                     return Command.SINGLE_SUCCESS;
@@ -75,74 +67,41 @@ public final class HyperConduitClientEvents {
 
     @SubscribeEvent
     public static void announceTunnel(ClientPlayerNetworkEvent.LoggingIn event) {
-        if (event.getConnection().channel() instanceof HyperConduitChannel channel) {
-            SessionStats stats = channel.engine().stats();
-            HyperConduitConfig config = ConfigHolder.get();
-            String controller = config != null && config.brutal ? "Brutal" : "Paced";
-            int rate = config == null ? 0 : config.mbps;
-            event.getPlayer().sendSystemMessage(Component.literal(
-                    "[HyperConduit] 隧道已建立 · " + controller + " " + rate
-                            + " Mbps · RTT " + millis(stats.smoothedRttNanos()) + " ms"));
+        Connection connection = event.getConnection();
+        if (!isTunnel(connection)) {
+            return;
         }
+        HyperConduitConfig config = ConfigHolder.get();
+        String suffix = config == null ? "" : " · " + bandwidth(config);
+        event.getPlayer().sendSystemMessage(Component.literal("[HyperConduit] 隧道已连接" + suffix));
     }
 
-    static java.util.List<String> clientStatusLines(HyperConduitChannel channel, HyperConduitConfig config) {
-        if (channel == null) {
-            return java.util.List.of("§b[HyperConduit]§r " + (config != null && config.enabled
-                    ? "§e[已启用]§r 当前连接未使用隧道" : "§8[已禁用]§r"));
+    static List<String> clientStatusLines(Connection connection, HyperConduitConfig config) {
+        if (!isTunnel(connection)) {
+            String state = config != null && config.enabled ? "§e[未使用隧道]§r" : "§8[已禁用]§r";
+            return List.of("§b[HyperConduit]§r " + state);
         }
-        SessionStats stats = channel.engine().stats();
-        RollingMetrics recent = stats.recent();
-        String controller = config != null && config.brutal ? "Brutal" : "Paced";
-        int rate = config == null ? 0 : config.mbps;
-        return java.util.List.of(
-                "§b[HyperConduit]§r §a[运行中]§r §e[" + controller + " " + rate + " Mbps]§r",
-                "§f[链路]§r RTT §b" + millis(stats.smoothedRttNanos()) + "ms§r  §7p95(10s) §f"
-                        + millis(recent.p95RttNanos()) + "ms§r  " + lossTag(recent.lossRate()) + "  "
-                        + retransTag(recent.retransmitsPerSecond()),
-                "§f[速率]§r §a↓ " + rate(recent.rxBytesPerSecond()) + "§r  §b↑ "
-                        + rate(recent.txBytesPerSecond()) + "§r  §7抖动(10s) "
-                        + millis(recent.jitterNanos()) + "ms§r");
+        List<String> lines = new ArrayList<>();
+        lines.add("§b[HyperConduit]§r §a[隧道已连接]§r");
+        lines.add("§f[配置]§r " + (config == null ? "§8未知§r" : bandwidth(config)));
+        return lines;
     }
 
-    private static HyperConduitChannel activeTunnel() {
+    private static String bandwidth(HyperConduitConfig config) {
+        return "§a↑ " + config.upMbps + " Mbps§r §b↓ " + config.downMbps + " Mbps§r §7("
+                + config.congestion + ")§r";
+    }
+
+    private static boolean isTunnel(Connection connection) {
+        return connection != null && connection.channel() != null && connection.channel().isActive()
+                && Boolean.TRUE.equals(connection.channel().attr(TunnelAttributes.TUNNEL).get());
+    }
+
+    private static Connection activeConnection() {
         Minecraft minecraft = Minecraft.getInstance();
         if (minecraft.getConnection() == null) {
             return null;
         }
-        Connection connection = minecraft.getConnection().getConnection();
-        return connection.channel() instanceof HyperConduitChannel channel ? channel : null;
-    }
-
-    private static long millis(long nanos) {
-        return nanos / 1_000_000;
-    }
-
-    private static String lossTag(double lossRate) {
-        String color = lossRate >= 0.025 ? "§c" : "§8";
-        return color + "丢包(10s) " + percent(lossRate) + "§r";
-    }
-
-    private static String retransTag(double retransmitsPerSecond) {
-        String color = retransmitsPerSecond > 0 ? "§e" : "§8";
-        return color + "重传 " + String.format(Locale.ROOT, "%.1f/s", retransmitsPerSecond) + "§r";
-    }
-
-    private static String percent(double value) {
-        return String.format(Locale.ROOT, "%.1f%%", value * 100);
-    }
-
-    private static String rate(long bytesPerSecond) {
-        return bytes(bytesPerSecond) + "/s";
-    }
-
-    private static String bytes(long value) {
-        if (value < 1024) {
-            return value + " B";
-        }
-        if (value < 1024 * 1024) {
-            return String.format(Locale.ROOT, "%.1f KiB", value / 1024.0);
-        }
-        return String.format(Locale.ROOT, "%.1f MiB", value / (1024.0 * 1024.0));
+        return minecraft.getConnection().getConnection();
     }
 }

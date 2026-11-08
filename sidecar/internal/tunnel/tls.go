@@ -38,7 +38,11 @@ func (s *trustSession) commit(ctx context.Context) error {
 func clientTLS(ctx context.Context, c config.Config) (client.TLSConfig, *trustSession, error) {
 	tlsConfig := client.TLSConfig{ServerName: c.ServerName}
 	if c.CAFile == "" {
-		s := &trustSession{store: trust.New(c.KnownServersFile), endpoint: c.Server}
+		endpoint := c.Server
+		if c.ServerEndpoint != "" {
+			endpoint = c.ServerEndpoint
+		}
+		s := &trustSession{store: trust.New(c.KnownServersFile), endpoint: endpoint}
 		// Replace CA/hostname checks with SPKI verification, not unauthenticated
 		// TLS. Go still verifies the TLS CertificateVerify signature/key proof.
 		tlsConfig.InsecureSkipVerify = true

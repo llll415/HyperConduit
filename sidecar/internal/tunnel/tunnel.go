@@ -99,7 +99,7 @@ func openServer(parent context.Context, raw config.Config) (*Endpoint, error) {
 	if c.CertFile == "" {
 		serverTLS = server.TLSConfig{GetCertificate: managedCertificate(c.IdentityFile, cert)}
 	}
-	outbound := &fixedOutbound{ctx: ctx, target: c.Target, timeout: time.Duration(c.ConnectTimeoutMS) * time.Millisecond, conns: conns, status: status}
+	outbound := &fixedOutbound{ctx: ctx, target: c.Target, timeout: time.Duration(c.ConnectTimeoutMS) * time.Millisecond, conns: conns, status: status, bridgeToken: c.BridgeToken}
 	s, err := server.NewServer(&server.Config{
 		Conn:      pc,
 		TLSConfig: serverTLS,

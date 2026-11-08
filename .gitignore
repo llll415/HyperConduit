@@ -15,6 +15,7 @@ scratch/
 bin/
 
 run/
+run-server/
 logs/
 *.log
 *.hprof

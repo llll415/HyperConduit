@@ -42,6 +42,8 @@ type Config struct {
 	Server           string `json:"server"`
 	Target           string `json:"target"`
 	Token            string `json:"token,omitempty"`
+	BridgeToken      string `json:"bridgeToken,omitempty"`
+	ServerEndpoint   string `json:"serverEndpoint,omitempty"`
 	CertFile         string `json:"certFile"`
 	KeyFile          string `json:"keyFile"`
 	CAFile           string `json:"caFile"`
@@ -151,6 +153,14 @@ func (c Config) normalizeClient() (Config, error) {
 	if c.IdentityFile != "" {
 		return Config{}, errors.New("identityFile: only available in server mode")
 	}
+	if c.BridgeToken != "" {
+		return Config{}, errors.New("bridgeToken: only available in server mode")
+	}
+	if c.ServerEndpoint != "" {
+		if err := validateDialAddress("serverEndpoint", c.ServerEndpoint); err != nil {
+			return Config{}, err
+		}
+	}
 	if c.CAFile != "" && c.KnownServersFile != "" {
 		return Config{}, errors.New("caFile: cannot be combined with knownServersFile")
 	}
@@ -178,6 +188,19 @@ func (c Config) normalizeServer() (Config, error) {
 	}
 	if c.Server != "" {
 		return Config{}, errors.New("server: must be empty in server mode")
+	}
+	if c.ServerEndpoint != "" {
+		return Config{}, errors.New("serverEndpoint: only available in client mode")
+	}
+	if c.BridgeToken != "" {
+		if len(c.BridgeToken) != 64 {
+			return Config{}, errors.New("bridgeToken: invalid bridge credential")
+		}
+		for _, b := range c.BridgeToken {
+			if !strings.ContainsRune("0123456789abcdef", b) {
+				return Config{}, errors.New("bridgeToken: invalid bridge credential")
+			}
+		}
 	}
 	if err := validateDialAddress("target", c.Target); err != nil {
 		return Config{}, err
