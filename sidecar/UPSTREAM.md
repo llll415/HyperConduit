@@ -88,3 +88,11 @@ git rev-parse 832a525:sidecar/hy2-core
 - 覆盖自动身份复用/续期、SPKI 变化拒绝、失败不落 pin、损坏存储、跨进程单赢家、锁取消与 Windows 私有 DACL；sidecar 重复 3 次通过。
 - 两个 module 的 `go vet`、sidecar 依赖校验通过；无 CGO 构建 Windows amd64、Linux amd64、macOS arm64 通过。Linux/macOS 仅编译，未运行。
 - 报告位于本机临时目录 `opencode/hyperconduit-{sidecar,core}-step4-tests.jsonl`。未做 race、MC 或公网验证。
+
+## 第 5 步集成记录
+
+- core 未修改。Go CLI 新增可选 `--managed`，通过 stdin 关闭指令或 EOF 停止；独立 CLI 行为保持不变。
+- 新增 Java `sidecar-runtime` 模块和当前平台程序构建任务；生成资源、manifest、Go/HY2/依赖许可进入 NeoForge jar，二进制不提交 Git。
+- Windows 本机：Java runtime 48 项（47 通过、1 POSIX 用例跳过），原 Java core 171 项、mod-common 2 项通过，NeoForge jar 构建成功。
+- Go sidecar 338 个测试/子测试通过，1 Unix 权限用例跳过，0 失败；`go vet` 通过。报告：临时目录 `opencode/hyperconduit-sidecar-step5-tests.jsonl`。
+- 覆盖真实进程启动/传输/关闭、父 JVM 强杀后 EOF 清理、私有临时配置与端口占用。MC 仍未接入；完整跨平台资源矩阵待第 10 步。

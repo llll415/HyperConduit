@@ -10,6 +10,7 @@ plugins {
 
 dependencies {
     api(project(":core"))
+    api(project(":sidecar-runtime"))
 
     // Mixin is provided by the loader at runtime (both Fabric Loader and NeoForge bundle it),
     // so it is compileOnly here and never packaged.

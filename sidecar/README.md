@@ -44,6 +44,7 @@ go test -count=1 -timeout=10m ./...
 ```
 
 错误写 stderr，隧道错误包含 `code` 和 `op`，不输出底层敏感信息；Ctrl+C 关闭进程。本机测试程序连接客户端输出的 `listen`。
+Java 管理时使用 `--managed`：stdin 接收 `{"version":1,"command":"shutdown"}`；管道关闭或无效指令也会停止进程。独立 CLI 默认不读取 stdin。
 
 ## 配置示例
 
@@ -125,7 +126,7 @@ go test -count=1 -timeout=10m ./...
 - 仅按原始字节转发 TCP，不解析 Minecraft 协议。
 - 无直接 TCP fallback，断线后不自动重连。
 - 玩家来源地址、MC 连接关联和 F3 尚未接入。
-- Java 模块尚未接入，游戏内 token 输入与 Java 侧控制均未连接；身份与信任文件当前只由 Go sidecar 写入。
+- Java 进程管理位于 [`sidecar-runtime`](../sidecar-runtime/README.md)，尚未接入 MC；游戏内 token/信任管理待实现。身份与信任文件只由 Go 写入。
 
 ## 状态接口
 

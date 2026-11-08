@@ -1,5 +1,5 @@
 // NeoForge entrypoint module: a thin shell around mod-common.
-// The jar bundles mod-common (Mixin + config + bridge) and core (transport stack) so that
+// The jar bundles mod-common, the legacy core, and the new sidecar runtime so that
 // NeoForge's mod list sees a single self-contained artifact.
 plugins {
     `java-library`
@@ -9,6 +9,7 @@ plugins {
 dependencies {
     implementation(project(":mod-common"))
     implementation(project(":core"))
+    implementation(project(":sidecar-runtime"))
 
     compileOnly("org.spongepowered:mixin:0.8.7")
 
@@ -24,7 +25,7 @@ neoForge {
     }
 }
 
-// Bundle mod-common and core into the NeoForge jar by unpacking their contents, so the mod is a
+// Bundle shared modules into the NeoForge jar by unpacking their contents, so the mod is a
 // single self-contained artifact (NeoForge's mods folder would otherwise see library jars that
 // carry no mod metadata). Uses withType rather than a concrete task class because ModDevGradle may
 // substitute its own Jar subtype.
@@ -33,12 +34,16 @@ tasks.withType<org.gradle.jvm.tasks.Jar>().matching { it.name == "jar" }.configu
 
     dependsOn(project(":mod-common").tasks.named("jar"))
     dependsOn(project(":core").tasks.named("jar"))
+    dependsOn(project(":sidecar-runtime").tasks.named("jar"))
 
     from({
         zipTree(project(":mod-common").tasks.named("jar").get().outputs.files.singleFile)
     })
     from({
         zipTree(project(":core").tasks.named("jar").get().outputs.files.singleFile)
+    })
+    from({
+        zipTree(project(":sidecar-runtime").tasks.named("jar").get().outputs.files.singleFile)
     })
 
     duplicatesStrategy = DuplicatesStrategy.EXCLUDE

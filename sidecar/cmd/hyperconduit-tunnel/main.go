@@ -25,7 +25,7 @@ func main() {
 	_ = os.Unsetenv("HYSTERIA_BBR_DEBUG")
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	if err := run(ctx, os.Args[1:], os.Stdout, os.Stderr); err != nil {
+	if err := runWithInput(ctx, os.Args[1:], os.Stdin, os.Stdout, os.Stderr); err != nil {
 		var classified *tunnel.Error
 		if errors.As(err, &classified) {
 			_ = json.NewEncoder(os.Stderr).Encode(struct {
@@ -41,17 +41,26 @@ func main() {
 	}
 }
 
+// run keeps the original entry point for tests. It deliberately supplies no
+// stdin, so callers of run can never enable managed mode by accident.
 func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
+	return runWithInput(ctx, args, nil, stdout, stderr)
+}
+
+// runWithInput is the testable entry point. Managed mode reads control input
+// from stdin; the non-managed path never touches it.
+func runWithInput(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 	if len(args) > 0 && args[0] == "trust" {
 		return runTrust(ctx, args[1:], stdout, stderr)
 	}
 	if len(args) == 0 || (args[0] != "client" && args[0] != "server") {
-		return errors.New("usage: hyperconduit-tunnel client|server --config <file.json>")
+		return errors.New("usage: hyperconduit-tunnel client|server --config <file.json> [--managed]")
 	}
 	mode := args[0]
 	flags := flag.NewFlagSet(mode, flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	path := flags.String("config", "", "JSON configuration file (credentials are not accepted as CLI flags)")
+	managed := flags.Bool("managed", false, "read a shutdown command from stdin and stop when stdin closes")
 	if err := flags.Parse(args[1:]); err != nil {
 		return err
 	}
@@ -62,7 +71,15 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
+	if *managed {
+		return runManaged(ctx, mode, c, stdin, stdout)
+	}
+	return runEndpoint(ctx, mode, c, stdout)
+}
+
+func runEndpoint(ctx context.Context, mode string, c config.Config, stdout io.Writer) error {
 	var endpoint *tunnel.Endpoint
+	var err error
 	if mode == "client" {
 		endpoint, err = tunnel.StartClient(ctx, c)
 	} else {
