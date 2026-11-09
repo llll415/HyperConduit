@@ -19,3 +19,21 @@ run-server/
 logs/
 *.log
 *.hprof
+
+# Local development plans and acceptance notes (kept on disk, not published).
+/HY2CORE_HANDOFF.md
+/HY2CORE_PLAN.md
+/docs/HY2CORE_ACCEPTANCE.md
+
+# Local scratch files, editor leftovers and OS metadata.
+/.opencode/
+/opencode/
+*.tmp
+*.temp
+*.bak
+*.orig
+*.rej
+*~
+.DS_Store
+Thumbs.db
+Desktop.ini

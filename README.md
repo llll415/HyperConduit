@@ -8,7 +8,7 @@
 > - 本项目的 `Brutal` 模式在确认率下降时，会在补偿系数上限内提高发送速率尝试补偿丢包。这是一种偏激进的发包策略；错误设置带宽、共享网络使用，或遇到运营商对 UDP/异常流量的策略时，可能影响同网络中的其他业务，也可能触发限速、丢包或阻断。使用者应自行承担相应网络风险。
 > - **1.0.0 底层重构说明**：相比旧版 `v0.1.1` 纯 Java 手搓的“QUIC-like / Brutal-like”，**`1.0.0` 已重构为随包托管的定制 Hysteria 2 `core/` + `apernet/quic-go` 二进制**，使用真正的 **RFC 9000 QUIC / HTTP/3 / TLS 1.3** 以及原生的 **Brutal / BBR / Reno** 拥塞控制（不兼容 `v0.1.1` 旧配置与旧协议；同时因针对 Minecraft 固定目标做了协议裁剪，不与原版 Hysteria 2 通用代理直接互通）。
 
-**HyperConduit** 是一个面向 **Minecraft 1.21.1 NeoForge** 的双端传输 Mod。它的目标很直接：把原版 Minecraft 的单条 TCP 连接换成 **QUIC/UDP 隧道**，配合 **BBR** 或 **Brutal** 激进流控，改善跨运营商、晚高峰、高丢包等恶劣网络环境下的联机体验。
+**HyperConduit** 是一个面向 **Minecraft 1.21.1 NeoForge** 的双端传输 Mod。它的目标很直接：把 Minecraft 游戏连接承载到 **QUIC/UDP 隧道**中，利用 **BBR**，或更激进的 **Brutal** 拥塞控制，改善跨运营商、晚高峰、高丢包等恶劣网络环境下的联机体验。
 
 ## 它做什么
 
@@ -22,7 +22,7 @@
 
 ### 1. 环境准备
 
-客户端与服务端均需 **Minecraft 1.21.1 对应的 NeoForge**（推荐 `21.1.252`，`21.1.265` 亦已实测通过）与 **Java 21**。将同一版本的 `hyperconduit-neoforge-1.0.0.jar` 放入双端的 `mods/` 目录。
+客户端与服务端均需 **Minecraft 1.21.1 对应的 NeoForge** 与 **Java 21**。将同一版本的 `hyperconduit-neoforge-1.0.0.jar` 放入双端的 `mods/` 目录。
 
 Mod 安装后**默认关闭**（`enabled=false`），首次启动不会自动生成配置文件，也不会改变原版连接。
 
@@ -30,19 +30,21 @@ Mod 安装后**默认关闭**（`enabled=false`），首次启动不会自动生
 
 - **客户端**：进入 **多人游戏** 界面 → 点击左上角 `HyperConduit…` → 将 `启用 HyperConduit` 设为 **开启** → 点击 **保存**。
 - **局域网（LAN）主机**：进入单人世界后打开 **对局域网开放** → 点击左上角 `HyperConduit 主机设置…` → 将 `启用 HyperConduit` 设为 **开启** 并保存 → 开放局域网。
-- **专用服务端（Dedicated Server）**：服务端没有图形界面。请在服务端根目录下新建 `config/hyperconduit-hy2.json`，写入：
+- **专用服务端（Dedicated Server）**：在服务端根目录下创建或编辑 `config/hyperconduit-hy2.json`，将 `enabled` 设为 `true`。新建文件时，最小配置为：
   ```json
   {
     "enabled": true
   }
   ```
-  保存后重启服务端。
+  保存后重启服务端。已有配置只需修改对应字段，其他设置保持不变。
+
+初次使用可保留发送/接收带宽 **`0 / 0 Mbps`**、拥塞控制 **`BBR`**、口令为空；连接正常后，再按线路情况调整带宽。
 
 ### 3. 放行端口并加入
 
-确认主机或服务端的防火墙/安全组已放行**与游戏端口同号的 UDP 端口**（例如游戏端口是 `25565`，就放行 `UDP 25565`）。玩家在多人游戏列表中照常填写原来的 `IP:端口` 加入即可。
+确认主机或服务端的防火墙/安全组已放行**与游戏端口同号的 UDP 端口**（例如游戏端口是 `25565`，就放行 `UDP 25565`）。从外网加入时，路由器端口转发或内网穿透也需支持并转发 UDP；仅有 TCP 转发不能承载隧道。玩家在多人游戏列表中照常填写服务器的 `host:port` 加入即可。
 
-设置保存后不会热切换已经连上的会话：客户端设置在下一次连接时生效；局域网主机需重新开放世界；专用服需重启监听。
+设置保存后不会热切换已经连上的会话：客户端设置在下一次连接时生效；局域网主机需退出当前世界、重新进入并开放局域网；专用服需重启。
 
 ## 流控模式：BBR、Brutal 与 Reno
 
@@ -76,11 +78,11 @@ HyperConduit 的核心在于拥塞控制选择，客户端与服务端会**按�
 1. **你开了 HyperConduit，但服务器明确声明未启用隧道、允许原版 TCP** → 询问是否**本次使用原版 TCP**。
 2. **你关着 HyperConduit，但服务器明确声明禁止原版 TCP** → 询问是否**本次启用 HyperConduit 隧道连接**。
 
-弹窗中的选择**仅对本次连接生效**，不会修改你的全局设置。一旦开始走隧道连接，若遇到超时、口令错误或身份变化，会直接显示带 `[HyperConduit]` 前缀的中文错误原因，不会在后台静默回退到 TCP。
+弹窗中的选择**仅对本次连接生效**，不会修改全局设置，也不会记住选择。未声明或探测超时时按当前设置连接，不额外询问。选择原版 TCP 时，本次不使用 HyperConduit 的服务器身份校验与隧道保护；选择隧道后，超时、口令错误或身份变化会直接报错，不会在后台切回 TCP。
 
 ## 配置文件、口令与身份信任
 
-完整配置文件位于 `config/hyperconduit-hy2.json`：
+配置文件位于各自运行目录的 `config/hyperconduit-hy2.json`。以下为完整默认配置：
 
 ```json
 {
@@ -97,11 +99,14 @@ HyperConduit 的核心在于拥塞控制选择，客户端与服务端会**按�
 }
 ```
 
+带宽为整数，范围 `0–1000000` Mbps；连接超时范围为 `100–120000` 毫秒，并发连接配置上限为 `1–4096`。口令最多 1024 个可打印 ASCII 字符，首尾不能有空白。配置使用严格 JSON，不接受注释、重复或未知字段。
+
 ### 可选口令与首次信任（TOFU）
 
 - **访问口令**：默认免口令。主机设置 `serverToken` 后，客户端需在 `clientToken` 填写相同口令才能建立隧道。游戏内口令输入框不回显明文（留空保存即保持原值，点击右侧 `清除客户端口令` / `清除服务器口令` 再保存可清空）。注意：口令只保护 UDP 隧道入口；若要强制所有玩家验证隧道口令，主机需同时开启 `禁止原版 TCP`。
 - **自动身份信任**：服务端首次启用隧道时会在 `config/hyperconduit/server-identity.json` 自动生成长期密钥（含私钥，请勿泄露）。客户端首次成功连接某个 `host:port` 后，会将服务端公钥指纹记入 `config/hyperconduit/known-servers.json`。
 - **身份变更保护**：若同一地址后续公钥发生变化，客户端会拦截连接并提示身份已变更。请先向服主确认是否更换了服务器身份，确认无误后可在 `HyperConduit… → 已信任服务器…` 中删除旧记录再重连。
+- **首次信任**：首次连接的身份记录依赖当次接触到的服务器公钥。需要核验时，通过可信的其他渠道向服主确认公钥指纹；列表能力探测不作为身份证明，也不会写入信任记录。
 
 ## 状态查看与命令
 
@@ -128,6 +133,7 @@ HyperConduit 的核心在于拥塞控制选择，客户端与服务端会**按�
 
 - 状态行中的控制器名称（`BBR` / `RENO` / `BRUTAL`）代表**本端实际运行的发送控制器**；
 - 速率为本端 QUIC 传输层统计（含重传与协议开销），多流复用同一连接时为连接汇总值。
+- 服务端首行是当前内存配置，玩家行和总计是实际在线连接；保存设置后、监听重建前，配置与正在运行的策略可能不同。单人世界的 `F3` 显示集成服务端状态。
 
 ---
 
@@ -158,9 +164,9 @@ HTTP/3 用于鉴权与能力发现；游戏字节流通过 HY2 的 TCP framing �
 
 ## 2. Hysteria 2 Core 裁剪与流控细节
 
-`sidecar/hy2-core` 基于官方 Hysteria 2 `core/` 源码定制，保留了标准 QUIC 传输、HTTP/3 鉴权握手与原生拥塞控制，并对非 Minecraft 场景做了收紧（详见 [`sidecar/PRUNING.md`](sidecar/PRUNING.md)）：
+`sidecar/hy2-core` 基于官方 Hysteria 2 `core/` 源码定制，保留了标准 QUIC 传输、HTTP/3 鉴权握手与原生拥塞控制，并对非 Minecraft 场景做了收紧：
 
-- **固定目标转发**：移除通用正向代理出站、SOCKS/HTTP 入口、应用层 UDP 转发与分片、请求嗅探改写、可配置伪装（Masquerade）、Chrome uTLS 指纹模拟及自动重连封装。服务端 `fixedOutbound` 仅允许拨号至启动配置指定的本机私有 Minecraft 后端。
+- **固定目标转发**：产品只提供 Minecraft 固定目标 TCP 转发，不提供 SOCKS/HTTP 入口。内置 core 已裁除应用层 UDP 转发与分片、请求嗅探改写、可配置伪装（Masquerade）、Chrome 指纹模拟及自动重连封装；服务端 `fixedOutbound` 将合法的固定服务请求转发至启动配置指定的后端。在 Mod 中，该后端是 Java 创建的本机私有 Minecraft 监听器。
 - **帧格式收紧**：每条 Minecraft TCP 连接对应一条有序 QUIC stream。TCP 请求头与响应头的 padding 长度字段保留在帧结构内，但写入端固定写 `0`、读取端拒绝任何非零 padding，且 HTTP/3 鉴权头不再发送随机 `Hysteria-Padding`。因此本 Mod 要求双端版本一致，不与原版 Hysteria 2 互通。
 - **Brutal 速率计算与 Pacer**：
   ```text
@@ -199,6 +205,8 @@ HTTP/3 用于鉴权与能力发现；游戏字节流通过 HY2 的 TCP framing �
 - **原版状态扩展与 QUIC 补缺**：`StatusPacketMixin` 在服务端状态 JSON 顶层附加当前活跃监听器的 `hyperconduit` 快照（由 `CapabilityListenerRegistry` 按实际存活的对外 TCP 与 sidecar 聚合，不读取未应用的新配置）。列表探测未取得明确声明时，客户端通过复用的 `hyperconduit-tunnel probe` 进程向 `https://hyperconduit/capability` 发起只读 HTTP/3 GET 查询。查询会建立 QUIC/TLS 连接，每条连接最多查询一次，不执行口令鉴权或后端拨号。
 - **连接前短路检查（`TransportDiscovery`）**：发起连接时设 6 秒总截止，TCP 连接与读取超时各为 1.2 秒。若取得 TCP 状态响应且含有效声明，则按规则判定是否弹窗；若响应中没有有效声明，则直接沿用当前设置连接，避免普通原版服务器额外等待 UDP 超时。TCP 状态查询失败时再尝试 UDP `probe` 查询。
 
+能力查询不发送玩家口令、不写入 TOFU，也不校验服务器公钥是否与已有 pin 一致；正式隧道连接独立执行身份与口令验证。
+
 ### 持久身份与 TOFU 信任库
 
 - **服务端身份（`internal/identity`）**：首次启动生成 ECDSA P-256 密钥对与自签名证书（有效期 365 天，到期前 30 天内复用同一私钥自动续签），持久化于 `config/hyperconduit/server-identity.json`。
@@ -212,6 +220,8 @@ Java 在收到子进程 `ready` 后发送 `observe` 命令开启遥测，Go 侧�
 - 首帧、超过 3.5 秒间隔后的恢复帧或字节计数回退时重置速率基线（显示 `速率待采样`）；超过 3.5 秒未收到新帧或进程退出时清空快照（显示 `指标暂不可用`）；
 - 服务端通过 `TunnelAttributes.CONNECTION_ID` 精确关联每个玩家通道所属的监听器与 QUIC 连接，多条流共享同一 QUIC 连接时展示该连接的汇总传输率。
 
+RTT 为 QUIC 平滑 RTT，速率不包含外层 UDP/IP 与链路层报头。统计样本无效只使指标失效或重新采样；子进程退出或受管控制协议失败则可能中断连接。
+
 ## 5. 平台支持、构建与验证状态
 
 ### 内置平台矩阵
@@ -220,11 +230,20 @@ Mod jar 默认打包以下 5 个平台的无 CGO 二进制（位于 `io/hypercon
 
 | 平台标识 | 当前验证状态 |
 | --- | --- |
-| `windows-amd64` | 现有自动回归通过，LAN 与 NeoForge / Youer 专用服部分路径已实测 |
+| `windows-amd64` | 自动回归通过，局域网联机及 NeoForge / Youer 专用服主要连接路径已实测 |
 | `linux-amd64` / `linux-arm64` | 已完成交叉编译、ELF 机器类型头检查、提取测试与 SHA-256 校验，尚未在对应系统实机运行 |
 | `darwin-amd64` / `darwin-arm64` | 已完成交叉编译、Mach-O 机器类型头检查、提取测试与 SHA-256 校验，尚未在 macOS 实机运行 |
 
-详细实测记录与待覆盖边界见 [`docs/HY2CORE_ACCEPTANCE.md`](docs/HY2CORE_ACCEPTANCE.md)。
+**1.0.0 重构后的传输实现已经过局域网联机测试，目前尚未进行公网联机与性能测试。** 已验证的功能包括：
+
+- LAN 主机开放、加入、退出重连，以及退出世界后的隧道关闭与重新开放。
+- 共存模式下的原版 TCP 与隧道连接，以及仅隧道模式下的入口限制。
+- BBR/Reno 使用、双向 Brutal 目标协商、主机每连接目标上限及禁用 Brutal。
+- 口令成功与失败、首次信任、身份变化拒绝连接，以及删除指定信任后的重新连接。
+- 列表能力与原版延时探测、两种单次传输选择、在线指标及连接分类。
+- NeoForge 专用服的共存连接与在线状态；Youer 专用服的共存/仅隧道连接，以及在线 `status`、重复 `watch` 和 `watch stop`。
+
+上述结果是功能联机验证，不是恶劣网络下的效果对比。跨运营商、跨境、晚高峰等公网线路表现，以及受控丢包下 BBR/Brutal 相对原版 TCP 的收益，需要后续测试。长期稳定性、多玩家限额隔离、SRV/IPv6 实际连接和更广泛的 Mod/插件组合也尚未系统验证。
 
 ### 工程结构与从源码构建
 
@@ -251,10 +270,10 @@ neoforge/build/libs/hyperconduit-neoforge-1.0.0.jar
 HyperConduit 基于以下开源项目构建或衍生（致谢仅说明代码来源与依赖关系，不代表上游作者对本项目的背书或协议互通）：
 
 - **[Hysteria 2 (`HyNetwork/hysteria`)](https://github.com/HyNetwork/hysteria)**（MIT License, Copyright 2023 Toby）
-  - `sidecar/hy2-core/` 直接派生自官方仓库固定提交 [`fb25dc852ebbc70658e67889f411887a82b7c281`](https://github.com/HyNetwork/hysteria/commit/fb25dc852ebbc70658e67889f411887a82b7c281) 的 `core/` 子目录，使用了其 QUIC/HTTP3 握手鉴权、带宽协商、Brutal/BBR/Reno 拥塞控制与通用 Pacer 实现。来源与改动记录见 [`sidecar/UPSTREAM.md`](sidecar/UPSTREAM.md) 与 [`sidecar/PRUNING.md`](sidecar/PRUNING.md)。
+  - `sidecar/hy2-core/` 直接派生自官方仓库固定提交 [`fb25dc852ebbc70658e67889f411887a82b7c281`](https://github.com/HyNetwork/hysteria/commit/fb25dc852ebbc70658e67889f411887a82b7c281) 的 `core/` 子目录，使用了其 QUIC/HTTP3 握手鉴权、带宽协商、Brutal/BBR/Reno 拥塞控制与通用 Pacer 实现。
 - **[`apernet/quic-go`](https://github.com/apernet/quic-go)** 及上游 **[`quic-go/quic-go`](https://github.com/quic-go/quic-go)**（MIT License）
   - 提供底层 QUIC 传输、多路复用流、HTTP/3 与拥塞控制接口。
 - **[Go 标准库与 `golang.org/x/*`](https://go.dev/)**（BSD-3-Clause License）及传输层传递依赖 **[`quic-go/qpack`](https://github.com/quic-go/qpack)**、**[`refraction-networking/utls`](https://github.com/refraction-networking/utls)**、**[`klauspost/compress`](https://github.com/klauspost/compress)**、**[`andybalholm/brotli`](https://github.com/andybalholm/brotli)**。
 - **[NeoForge](https://neoforged.net/)**、**[ModDevGradle](https://github.com/neoforged/ModDevGradle)**、**[SpongePowered Mixin](https://github.com/SpongePowered/Mixin)**、**[ParchmentMC](https://parchmentmc.org/)**、**[Netty](https://netty.io/)**、**[Google Gson](https://github.com/google/gson)**，以及测试工具 **[JUnit 5](https://junit.org/junit5/)**、**[OW2 ASM](https://asm.ow2.io/)**、**[`stretchr/testify`](https://github.com/stretchr/testify)**、**[`uber-go/goleak`](https://github.com/uber-go/goleak)**。
 
-本 Mod 元数据声明为 **MIT**；内置上游源码与第三方依赖各自遵循其原有许可证。完整依赖版本映射与许可证原文见 [`sidecar/THIRD_PARTY_NOTICES.md`](sidecar/THIRD_PARTY_NOTICES.md)、[`sidecar/hy2-core/LICENSE.md`](sidecar/hy2-core/LICENSE.md) 及 [`sidecar/licenses/`](sidecar/licenses/)（构建时亦随包写入 jar 内 `META-INF/hyperconduit-sidecar/`）。
+本 Mod 元数据声明为 **MIT**；内置上游源码与第三方依赖各自遵循其原有许可证。第三方声明与许可原文随包保存在 jar 内的 `META-INF/hyperconduit-sidecar/`。
