@@ -84,6 +84,10 @@ val verifyDistribution by tasks.registering {
     doLast {
         val artifact = tasks.named<org.gradle.jvm.tasks.Jar>("jar").get().archiveFile.get().asFile
         ZipFile(artifact).use { zip ->
+            val metadataEntry = zip.getEntry("META-INF/neoforge.mods.toml") ?: error("Missing mod metadata")
+            val metadata = zip.getInputStream(metadataEntry).bufferedReader(Charsets.UTF_8).use { it.readText() }
+            check(Regex("(?m)^\\s*version\\s*=\\s*\"${Regex.escape(project.version.toString())}\"\\s*$")
+                .containsMatchIn(metadata)) { "Mod metadata version does not match project version" }
             val platforms = listOf("windows-amd64", "linux-amd64", "linux-arm64", "darwin-amd64", "darwin-arm64")
             for (platform in platforms) {
                 val root = "io/hyperconduit/sidecar/bin/$platform/"
