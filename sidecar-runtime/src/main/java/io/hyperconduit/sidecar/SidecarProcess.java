@@ -63,6 +63,7 @@ public final class SidecarProcess implements AutoCloseable {
         Path executable;
         try { executable = new BinaryExtractor().extract(cacheDirectory); }
         catch (IllegalArgumentException unsupported) { throw new SidecarException("unsupported_platform"); }
+        catch (IOException invalid) { throw new SidecarException("binary_invalid"); }
         return start(executable, mode, config, workingDirectory, startupTimeout, stopTimeout);
     }
 
@@ -70,7 +71,14 @@ public final class SidecarProcess implements AutoCloseable {
     public static SidecarProcess startConfigured(Path cacheDirectory, Path configDirectory, String mode,
                                                  Map<String, ?> config, Path workingDirectory,
                                                  Duration startupTimeout, Duration stopTimeout) throws IOException {
-        PrivateConfig file = PrivateConfig.create(configDirectory, config);
+        PrivateConfig file;
+        try {
+            file = PrivateConfig.create(configDirectory, config);
+        } catch (IllegalArgumentException unsupported) {
+            throw new SidecarException("unsupported_platform");
+        } catch (IOException configFailure) {
+            throw new SidecarException("config_unavailable", configFailure.getMessage());
+        }
         try {
             SidecarProcess child = startBundled(cacheDirectory, mode, file.path(), workingDirectory, startupTimeout, stopTimeout);
             child.launchConfig = file;
@@ -93,7 +101,12 @@ public final class SidecarProcess implements AutoCloseable {
         ProcessBuilder builder = new ProcessBuilder(command).directory(workingDirectory.toFile());
         builder.environment().remove("HYSTERIA_BRUTAL_DEBUG");
         builder.environment().remove("HYSTERIA_BBR_DEBUG");
-        Process process = builder.start();
+        Process process;
+        try {
+            process = builder.start();
+        } catch (IOException launchFailure) {
+            throw new SidecarException("launch_failed");
+        }
         try {
             return new SidecarProcess(process, mode, startupTimeout, stopTimeout);
         } catch (RuntimeException e) {

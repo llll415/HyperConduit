@@ -4,8 +4,11 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.io.IOException;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
+import java.util.List;
+import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
@@ -13,6 +16,7 @@ import java.util.concurrent.TimeUnit;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -205,6 +209,52 @@ class SidecarProcessTest {
             closeQuietly(second);
         }
         assertFalse(second.isAlive());
+    }
+
+    @Test
+    void missingExecutableMapsToLaunchFailed(@TempDir Path workingDirectory) {
+        Path missing = workingDirectory.resolve("missing-hyperconduit-tunnel");
+
+        SidecarException failure = assertThrows(SidecarException.class, () ->
+                SidecarProcess.startCommand(List.of(missing.toString()), "client", workingDirectory,
+                        Duration.ofSeconds(1), Duration.ofSeconds(1)));
+
+        assertEquals("launch_failed", failure.code());
+        assertNull(failure.getCause());
+        assertTrue(failure.getMessage().startsWith("[HyperConduit] "));
+        assertFalse(failure.getMessage().contains(missing.toString()));
+    }
+
+    @Test
+    void extractionFailureMapsToBinaryInvalid(@TempDir Path workingDirectory) throws Exception {
+        Path cacheFile = Files.createFile(workingDirectory.resolve("cache-is-a-file"));
+        Path config = Files.createFile(workingDirectory.resolve("config.json"));
+
+        SidecarException failure = assertThrows(SidecarException.class, () ->
+                SidecarProcess.startBundled(cacheFile, "client", config, workingDirectory,
+                        Duration.ofSeconds(1), Duration.ofSeconds(1)));
+
+        assertEquals("binary_invalid", failure.code());
+        assertNull(failure.getCause());
+        assertTrue(failure.getMessage().startsWith("[HyperConduit] "));
+        assertFalse(failure.getMessage().contains(cacheFile.toString()));
+    }
+
+    @Test
+    void privateConfigFailureMapsToConfigUnavailable(@TempDir Path workingDirectory) throws Exception {
+        Path configFile = Files.createFile(workingDirectory.resolve("config-dir-is-a-file"));
+        Path cacheDirectory = Files.createDirectory(workingDirectory.resolve("cache"));
+
+        SidecarException failure = assertThrows(SidecarException.class, () ->
+                SidecarProcess.startConfigured(cacheDirectory, configFile, "client", Map.of(),
+                        workingDirectory, Duration.ofSeconds(1), Duration.ofSeconds(1)));
+
+        assertEquals("config_unavailable", failure.code());
+        assertEquals("private_config_directory", failure.diagnosticCode());
+        assertNull(failure.getCause());
+        assertTrue(failure.getMessage().startsWith("[HyperConduit] "));
+        assertFalse(failure.getMessage().contains("private_config_directory"));
+        assertFalse(failure.toString().contains("private_config_directory"));
     }
 
     private static SidecarProcess start(Path workingDirectory, String mode,

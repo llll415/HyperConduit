@@ -1,6 +1,7 @@
 package io.hyperconduit.neoforge.client;
 
 import io.hyperconduit.mod.bridge.TrustService;
+import io.hyperconduit.sidecar.SidecarErrorText;
 import net.minecraft.client.gui.GuiGraphics;
 import net.minecraft.client.gui.components.Button;
 import net.minecraft.client.gui.screens.Screen;
@@ -44,7 +45,8 @@ final class KnownServersScreen extends Screen {
                     clearWidgets(); buildButtons();
                 });
             } catch (Exception failure) {
-                minecraft.execute(() -> { if (generation == request) notice = "无法读取信任记录"; });
+                String message = SidecarErrorText.describeTrust(failure);
+                minecraft.execute(() -> { if (generation == request) notice = message; });
             }
         });
     }
@@ -77,12 +79,12 @@ final class KnownServersScreen extends Screen {
     public void render(GuiGraphics graphics, int mouseX, int mouseY, float partialTick) {
         super.render(graphics, mouseX, mouseY, partialTick);
         graphics.drawCenteredString(font, title, width / 2, height / 2 - 108, 0xFFFFFF);
-        if (!notice.isEmpty() && !entries.isEmpty()) graphics.drawCenteredString(font, notice, width / 2, height / 2 + 65, 0xFF5555);
+        if (!notice.isEmpty() && !entries.isEmpty()) graphics.drawCenteredString(font, notice, width / 2, height / 2 + 65, 0xFF8080);
         if (entries.isEmpty()) {
-            graphics.drawCenteredString(font, notice, width / 2, height / 2 - 10, 0xA0A0A0);
+            graphics.drawCenteredString(font, notice, width / 2, height / 2 - 10, 0xD0D0D0);
         } else if (selected >= 0 && selected < entries.size()) {
             String fingerprint = entries.get(selected).getValue();
-            graphics.drawCenteredString(font, "指纹: " + fingerprint, width / 2, height / 2 + 88, 0xA0A0A0);
+            graphics.drawCenteredString(font, "指纹: " + fingerprint, width / 2, height / 2 + 88, 0xC8C8C8);
         }
     }
 
@@ -95,7 +97,8 @@ final class KnownServersScreen extends Screen {
                 TrustService.forget(endpoint);
                 minecraft.execute(this::load);
             } catch (Exception failure) {
-                minecraft.execute(() -> notice = "无法删除信任记录");
+                String message = SidecarErrorText.describeTrust(failure);
+                minecraft.execute(() -> notice = message);
             }
         });
     }

@@ -22,8 +22,11 @@ import java.util.function.Consumer;
  */
 public final class HyperConduitConfigScreen extends Screen {
 
-    private static final int LABEL_COLOR = 0xA0A0A0;
-    private static final int ERROR_COLOR = 0xFF5555;
+    private static final int TITLE_COLOR = 0xFFFFFF;
+    private static final int LABEL_COLOR = 0xE0E0E0;
+    private static final int HINT_COLOR = 0xE8E8E8;
+    private static final int ERROR_COLOR = 0xFF8080;
+    private static final String ERROR_PREFIX = "[HyperConduit] ";
     private static final int ROW = 22;
     private static final int TOP = 36;
 
@@ -132,11 +135,11 @@ public final class HyperConduitConfigScreen extends Screen {
     public void render(GuiGraphics graphics, int mouseX, int mouseY, float partialTick) {
         super.render(graphics, mouseX, mouseY, partialTick);
 
-        graphics.drawCenteredString(font, title, width / 2, 10, 0xFFFFFF);
+        drawCentered(graphics, title, 10, TITLE_COLOR);
         if (errorMessage != null) {
-            graphics.drawCenteredString(font, errorMessage, width / 2, 24, ERROR_COLOR);
+            drawCentered(graphics, Component.literal(errorMessage), 24, ERROR_COLOR);
         } else {
-            graphics.drawCenteredString(font, "保存后将在下一次连接或开放局域网时生效", width / 2, 24, LABEL_COLOR);
+            drawCentered(graphics, Component.literal("保存后将在下一次连接或开放局域网时生效"), 24, HINT_COLOR);
         }
 
         drawFieldLabel(graphics, "发送Mbps", upMbps);
@@ -147,11 +150,15 @@ public final class HyperConduitConfigScreen extends Screen {
         drawFieldLabel(graphics, "最大连接", maxConnections);
     }
 
+    private void drawCentered(GuiGraphics graphics, Component text, int y, int color) {
+        graphics.drawString(font, text, (width - font.width(text)) / 2, y, color, true);
+    }
+
     private void drawFieldLabel(GuiGraphics graphics, String text, EditBox box) {
         if (box == null) {
             return;
         }
-        graphics.drawString(font, text, box.getX() - labelWidth, box.getY() + 6, LABEL_COLOR, false);
+        graphics.drawString(font, text, box.getX() - labelWidth, box.getY() + 6, LABEL_COLOR, true);
     }
 
     private Button toggleButton(int x, int y, int width, String label, boolean initial,
@@ -226,9 +233,9 @@ public final class HyperConduitConfigScreen extends Screen {
 
     private static String friendlyError(String code) {
         if (code == null) {
-            return "保存失败，请检查配置。";
+            return ERROR_PREFIX + "保存失败，请检查配置。";
         }
-        return switch (code) {
+        String message = switch (code) {
             case "config_up_mbps", "config_down_mbps" -> "带宽必须在 0–1000000 Mbps 之间。";
             case "config_congestion" -> "拥塞控制只能是 BBR 或 Reno。";
             case "config_client_token", "config_server_token" ->
@@ -239,6 +246,7 @@ public final class HyperConduitConfigScreen extends Screen {
             case "config_too_large" -> "配置文件过大。";
             default -> "保存失败，请检查配置。";
         };
+        return ERROR_PREFIX + message;
     }
 
     private static Component toggleLabel(String label, boolean value) {

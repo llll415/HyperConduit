@@ -78,7 +78,7 @@ public final class HyperConduitClientEvents {
 
     static List<String> clientStatusLines(Connection connection, HyperConduitConfig config) {
         if (!isTunnel(connection)) {
-            String state = config != null && config.enabled ? "§e[未使用隧道]§r" : "§8[已禁用]§r";
+            String state = config != null && config.enabled ? "§e[未使用隧道]§r" : "§7[已禁用]§r";
             return List.of("§b[HyperConduit]§r " + state);
         }
         List<String> lines = new ArrayList<>();

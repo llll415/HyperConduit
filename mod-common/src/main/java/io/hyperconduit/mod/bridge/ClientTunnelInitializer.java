@@ -51,7 +51,7 @@ public final class ClientTunnelInitializer extends ChannelInitializer<Channel> {
 
         @Override public void connect(ChannelHandlerContext ctx, SocketAddress remote, SocketAddress local, ChannelPromise promise) {
             if (!(remote instanceof InetSocketAddress target) || target.isUnresolved()) {
-                promise.tryFailure(new IllegalArgumentException("Unresolved server address"));
+                promise.tryFailure(new io.hyperconduit.sidecar.SidecarException("address_unresolved"));
                 ctx.close(); return;
             }
             promise.addListener(future -> { if (!future.isSuccess()) { stop(); ctx.close(); } });

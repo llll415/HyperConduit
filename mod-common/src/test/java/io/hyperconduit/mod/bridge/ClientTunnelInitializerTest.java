@@ -122,8 +122,10 @@ class ClientTunnelInitializerTest {
             assertTrue(connect.await(2, TimeUnit.SECONDS));
 
             assertFalse(connect.isSuccess());
-            assertInstanceOf(IllegalArgumentException.class, connect.cause());
-            assertEquals("Unresolved server address", connect.cause().getMessage());
+            assertInstanceOf(SidecarException.class, connect.cause());
+            assertEquals("address_unresolved", ((SidecarException) connect.cause()).code());
+            assertTrue(((SidecarException) connect.cause()).getMessage().startsWith("[HyperConduit] "));
+            assertNull(connect.cause().getCause());
             assertFalse(channel.isOpen());
 
             // The unresolved path must not reach ConfigHolder/TunnelService: no config directory is
