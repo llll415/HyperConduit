@@ -93,6 +93,20 @@ func TestManagedServerStopsOnControl(t *testing.T) {
 			},
 		},
 		{
+			name: "duplicate field",
+			control: func(pw *io.PipeWriter) error {
+				_, err := io.WriteString(pw, `{"version":1,"version":1,"command":"shutdown"}`+"\n")
+				return err
+			},
+		},
+		{
+			name: "duplicate command",
+			control: func(pw *io.PipeWriter) error {
+				_, err := io.WriteString(pw, `{"version":1,"command":"shutdown","command":"observe"}`+"\n")
+				return err
+			},
+		},
+		{
 			name: "malformed JSON",
 			control: func(pw *io.PipeWriter) error {
 				_, err := io.WriteString(pw, "not json\n")
@@ -253,6 +267,9 @@ func TestReadManagedCommand(t *testing.T) {
 		{name: "empty", input: "", want: false},
 		{name: "blank line", input: "\n", want: false},
 		{name: "malformed", input: "{", want: false},
+		{name: "observe", input: `{"version":1,"command":"observe"}`, want: false},
+		{name: "duplicate field", input: `{"version":1,"version":1,"command":"shutdown"}`, want: false},
+		{name: "duplicate command", input: `{"version":1,"command":"shutdown","command":"observe"}`, want: false},
 		{name: "unknown command", input: `{"version":1,"command":"keepalive"}`, want: false},
 		{name: "unknown version", input: `{"version":2,"command":"shutdown"}`, want: false},
 		{name: "unknown field", input: `{"version":1,"command":"shutdown","token":"secret"}`, want: false},

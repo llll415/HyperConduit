@@ -3,6 +3,8 @@ package io.hyperconduit.neoforge.client;
 import com.mojang.brigadier.Command;
 import io.hyperconduit.mod.config.ConfigHolder;
 import io.hyperconduit.mod.config.HyperConduitConfig;
+import io.hyperconduit.mod.bridge.TunnelMetrics;
+import io.hyperconduit.mod.bridge.TelemetryText;
 import io.hyperconduit.neoforge.HyperConduitServerEvents;
 import io.hyperconduit.sidecar.TunnelAttributes;
 import net.minecraft.client.Minecraft;
@@ -71,9 +73,7 @@ public final class HyperConduitClientEvents {
         if (!isTunnel(connection)) {
             return;
         }
-        HyperConduitConfig config = ConfigHolder.get();
-        String suffix = config == null ? "" : " · " + bandwidth(config);
-        event.getPlayer().sendSystemMessage(Component.literal("[HyperConduit] 隧道已连接" + suffix));
+        event.getPlayer().sendSystemMessage(Component.literal("[HyperConduit] 隧道已连接"));
     }
 
     static List<String> clientStatusLines(Connection connection, HyperConduitConfig config) {
@@ -83,13 +83,9 @@ public final class HyperConduitClientEvents {
         }
         List<String> lines = new ArrayList<>();
         lines.add("§b[HyperConduit]§r §a[隧道已连接]§r");
-        lines.add("§f[配置]§r " + (config == null ? "§8未知§r" : bandwidth(config)));
+        lines.add("§f[传输]§r " + TelemetryText.describe(TunnelMetrics.connection(connection.channel())));
+        lines.add("§7速率含 QUIC 重传与协议开销，非游戏有效载荷§r");
         return lines;
-    }
-
-    private static String bandwidth(HyperConduitConfig config) {
-        return "§a↑ " + config.upMbps + " Mbps§r §b↓ " + config.downMbps + " Mbps§r §7("
-                + config.congestion + ")§r";
     }
 
     private static boolean isTunnel(Connection connection) {

@@ -1,9 +1,5 @@
 package io.hyperconduit.sidecar;
 
-import com.google.gson.JsonObject;
-import com.google.gson.stream.JsonReader;
-import com.google.gson.stream.JsonToken;
-
 import java.io.*;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
@@ -17,6 +13,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.regex.Pattern;
 
 /** Owns one managed process. No automatic restart or transport fallback. */
 public final class SidecarProcess implements AutoCloseable {
@@ -24,6 +21,9 @@ public final class SidecarProcess implements AutoCloseable {
 
     private static final Set<String> ERROR_CODES = Set.of("config", "tls", "identity_changed", "storage",
             "authentication", "timeout", "canceled", "limit", "target", "transport");
+    private static final byte[] OBSERVE_COMMAND =
+            "{\"version\":1,\"command\":\"observe\"}\n".getBytes(StandardCharsets.UTF_8);
+    private static final Pattern STATS_EVENT = Pattern.compile("\"event\"\\s*:\\s*\"stats\"");
     private static final ScheduledExecutorService TIMER = Executors.newSingleThreadScheduledExecutor(r -> {
         Thread t = new Thread(r, "hyperconduit-sidecar-timer");
         t.setDaemon(true);
@@ -38,6 +38,9 @@ public final class SidecarProcess implements AutoCloseable {
     private final AtomicBoolean stopping = new AtomicBoolean();
     private final AtomicBoolean failed = new AtomicBoolean();
     private final AtomicBoolean stopScheduled = new AtomicBoolean();
+    private final AtomicBoolean telemetryStarted = new AtomicBoolean();
+    private final Object controlLock = new Object();
+    private final TelemetryTracker telemetry = new TelemetryTracker();
     private final CountDownLatch stopped = new CountDownLatch(1);
     private final CountDownLatch readers = new CountDownLatch(2);
     private final Thread hook;
@@ -111,6 +114,7 @@ public final class SidecarProcess implements AutoCloseable {
         Thread.ofPlatform().daemon().name("hyperconduit-sidecar-exit").start(() -> {
             try {
                 int code = process.waitFor();
+                telemetry.clear();
                 readers.await(2, TimeUnit.SECONDS); // Allow final structured errors to drain first.
                 if (!stopping.get() && !failed.get()) {
                     String reason = ready.isDone() ? "unexpected_exit" : "exited_before_ready";
@@ -136,6 +140,48 @@ public final class SidecarProcess implements AutoCloseable {
     public CompletableFuture<SidecarException> failure() { return failure.copy(); }
     public boolean isAlive() { return process.isAlive(); }
     public long pid() { return process.pid(); }
+
+    /**
+     * Opts this process into the bounded stats stream. The call is idempotent
+     * and non-blocking: at most one writer thread sends the observe command.
+     * A write failure disables telemetry only; it never closes the game tunnel.
+     */
+    public void enableTelemetry() {
+        if (!telemetryStarted.compareAndSet(false, true)) return;
+        Thread.ofPlatform().daemon().name("hyperconduit-sidecar-telemetry").start(this::sendObserve);
+    }
+
+    /**
+     * Returns the latest live telemetry sample, or {@code null} when telemetry
+     * was never enabled, has gone stale, or the process stopped or failed.
+     */
+    public TelemetrySnapshot telemetry() {
+        if (!telemetryStarted.get()
+                || !ready.isDone()
+                || ready.isCompletedExceptionally()
+                || stopping.get()
+                || failed.get()
+                || !process.isAlive()) {
+            return null;
+        }
+        return telemetry.get();
+    }
+
+    private void sendObserve() {
+        synchronized (controlLock) {
+            if (stopping.get() || failed.get() || !process.isAlive()) {
+                telemetry.clear();
+                return;
+            }
+            try {
+                OutputStream out = process.getOutputStream();
+                out.write(OBSERVE_COMMAND);
+                out.flush();
+            } catch (IOException e) {
+                telemetry.clear(); // Telemetry is optional; the tunnel stays up.
+            }
+        }
+    }
 
     private static void checkTimeout(Duration value) {
         if (value == null || value.toMillis() < 1 || value.compareTo(Duration.ofMinutes(5)) > 0) {
@@ -173,48 +219,96 @@ public final class SidecarProcess implements AutoCloseable {
 
     private void event(String text, boolean stdout) {
         if (text.isBlank()) return;
+        Map<String, Object> root;
         try {
-            JsonReader reader = new JsonReader(new StringReader(text));
-            reader.setLenient(false);
-            JsonObject object = new JsonObject();
-            reader.beginObject();
-            while (reader.hasNext()) {
-                String name = reader.nextName();
-                if (object.has(name)) throw new IOException("Duplicate protocol field");
-                if (name.equals("version")) {
-                    if (reader.peek() != JsonToken.NUMBER || !reader.nextString().equals("1")) {
-                        fail("protocol_version"); return;
-                    }
-                    object.addProperty(name, 1);
-                } else {
-                    if (reader.peek() != JsonToken.STRING) throw new IOException("Invalid protocol field");
-                    if (!Set.of("event", "mode", "listen", "fingerprint", "code", "op").contains(name)) {
-                        throw new IOException("Unknown protocol field");
-                    }
-                    object.addProperty(name, reader.nextString());
-                }
+            root = TelemetryTracker.parseRoot(text);
+        } catch (TelemetryTracker.DuplicateFieldException duplicate) {
+            // A duplicate stats field is telemetry-only and still carries the
+            // sequence high-water mark; duplicate ready/error stays fatal.
+            Object type = duplicate.root().get("event");
+            if (type instanceof String value && "stats".equals(value)) {
+                telemetry.reject(duplicate.root());
+            } else if (stdout) {
+                fail("protocol_invalid");
             }
-            reader.endObject();
-            if (reader.peek() != JsonToken.END_DOCUMENT) throw new IOException("Trailing protocol data");
-            if (object.get("version").getAsInt() != 1) { fail("protocol_version"); return; }
-            String type = object.get("event").getAsString();
-            if ("error".equals(type)) {
-                String code = object.get("code").getAsString();
-                fail(ERROR_CODES.contains(code) ? code : "transport");
-            } else if (stdout && "ready".equals(type)) {
-                if (!mode.equals(object.get("mode").getAsString())) { fail("protocol_mode"); return; }
-                InetSocketAddress address = parseListen(object.get("listen").getAsString());
-                String fingerprint = object.has("fingerprint") ? object.get("fingerprint").getAsString() : "";
-                if (!fingerprint.isEmpty() && !fingerprint.matches("SHA256:[A-Za-z0-9+/]{43}")) {
-                    fail("protocol_fingerprint"); return;
-                }
-                if (ready.complete(new Ready(1, mode, address, fingerprint))) cancelDeadline();
-                else if (!stopping.get()) fail("protocol_duplicate_ready");
-            } else if (stdout) fail("protocol_event");
+            return;
         } catch (RuntimeException | IOException e) {
+            // A malformed stats frame is telemetry-only; never fail the tunnel.
+            if (STATS_EVENT.matcher(text).find()) {
+                telemetry.reject(text);
+                return;
+            }
             // Raw stderr is consumed but never retained: it may contain secrets.
             if (stdout) fail("protocol_invalid");
+            return;
         }
+        Object eventValue = root.get("event");
+        if (!(eventValue instanceof String type)) {
+            if (stdout) fail("protocol_invalid");
+            return;
+        }
+        if ("stats".equals(type)) {
+            // Late frames must never resurrect telemetry after close/failure or
+            // before the opt-in handshake completed. Stats errors never fail
+            // the game tunnel; they only drop the current sample.
+            if (!stdout
+                    || !telemetryStarted.get()
+                    || !ready.isDone()
+                    || ready.isCompletedExceptionally()
+                    || stopping.get()
+                    || failed.get()
+                    || !process.isAlive()) {
+                telemetry.clear();
+                return;
+            }
+            TelemetryTracker.Frame frame = TelemetryTracker.parseStats(root);
+            if (frame == null) telemetry.reject(root);
+            else telemetry.accept(frame);
+            return;
+        }
+        try {
+            dispatchLegacy(root, type, stdout);
+        } catch (RuntimeException | IOException e) {
+            if (stdout) fail("protocol_invalid");
+        }
+    }
+
+    /** Preserves the original strict ready/error behavior for non-stats events. */
+    private void dispatchLegacy(Map<String, Object> root, String type, boolean stdout) throws IOException {
+        if (!root.containsKey("version")) throw new IOException("Missing protocol version");
+        Object versionValue = root.get("version");
+        if (!(versionValue instanceof TelemetryTracker.JsonNumber version) || !version.text().equals("1")) {
+            fail("protocol_version");
+            return;
+        }
+        for (Map.Entry<String, Object> field : root.entrySet()) {
+            String name = field.getKey();
+            if (name.equals("version")) continue;
+            if (!Set.of("event", "mode", "listen", "fingerprint", "code", "op").contains(name)) {
+                throw new IOException("Unknown protocol field");
+            }
+            if (!(field.getValue() instanceof String)) throw new IOException("Invalid protocol field");
+        }
+        if ("error".equals(type)) {
+            Object codeValue = root.get("code");
+            if (!(codeValue instanceof String code)) throw new IOException("Missing error code");
+            fail(ERROR_CODES.contains(code) ? code : "transport");
+        } else if (stdout && "ready".equals(type)) {
+            Object modeValue = root.get("mode");
+            Object listenValue = root.get("listen");
+            if (!(modeValue instanceof String readyMode) || !(listenValue instanceof String listen)) {
+                throw new IOException("Missing ready field");
+            }
+            if (!mode.equals(readyMode)) { fail("protocol_mode"); return; }
+            InetSocketAddress address = parseListen(listen);
+            String fingerprint = root.get("fingerprint") instanceof String value ? value : "";
+            if (!fingerprint.isEmpty() && !fingerprint.matches("SHA256:[A-Za-z0-9+/]{43}")) {
+                fail("protocol_fingerprint");
+                return;
+            }
+            if (ready.complete(new Ready(1, mode, address, fingerprint))) cancelDeadline();
+            else if (!stopping.get()) fail("protocol_duplicate_ready");
+        } else if (stdout) fail("protocol_event");
     }
 
     private InetSocketAddress parseListen(String text) throws IOException {
@@ -241,6 +335,7 @@ public final class SidecarProcess implements AutoCloseable {
     }
 
     private void fail(String code) {
+        telemetry.clear();
         if (!failed.compareAndSet(false, true)) return;
         SidecarException error = new SidecarException(code);
         failure.complete(error);
@@ -254,6 +349,7 @@ public final class SidecarProcess implements AutoCloseable {
     }
 
     @Override public void close() {
+        telemetry.clear();
         if (!stopping.compareAndSet(false, true)) {
             try { stopped.await(stopTimeout.toMillis() + 3000, TimeUnit.MILLISECONDS); }
             catch (InterruptedException e) { Thread.currentThread().interrupt(); }
@@ -265,11 +361,13 @@ public final class SidecarProcess implements AutoCloseable {
         List<ProcessHandle> descendants = process.descendants().toList();
         // Never let a child that stopped reading stdin block the shutdown caller.
         Thread.ofPlatform().daemon().name("hyperconduit-sidecar-control").start(() -> {
-            try {
-                process.getOutputStream().write("{\"version\":1,\"command\":\"shutdown\"}\n".getBytes(StandardCharsets.UTF_8));
-                process.getOutputStream().flush();
-                process.getOutputStream().close();
-            } catch (IOException ignored) {}
+            synchronized (controlLock) {
+                try {
+                    process.getOutputStream().write("{\"version\":1,\"command\":\"shutdown\"}\n".getBytes(StandardCharsets.UTF_8));
+                    process.getOutputStream().flush();
+                    process.getOutputStream().close();
+                } catch (IOException ignored) {}
+            }
         });
         try {
             if (!process.waitFor(stopTimeout.toMillis(), TimeUnit.MILLISECONDS)) {
@@ -285,6 +383,7 @@ public final class SidecarProcess implements AutoCloseable {
             Thread.currentThread().interrupt();
         } finally {
             descendants.stream().filter(ProcessHandle::isAlive).forEach(ProcessHandle::destroyForcibly);
+            telemetry.clear();
             closeStreams();
             removeHook();
             cleanupConfig();

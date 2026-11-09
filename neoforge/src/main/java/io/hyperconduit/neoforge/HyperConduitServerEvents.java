@@ -3,6 +3,8 @@ package io.hyperconduit.neoforge;
 import com.mojang.brigadier.Command;
 import io.hyperconduit.mod.config.ConfigHolder;
 import io.hyperconduit.mod.config.HyperConduitConfig;
+import io.hyperconduit.mod.bridge.TunnelMetrics;
+import io.hyperconduit.mod.bridge.TelemetryText;
 import io.hyperconduit.sidecar.TunnelAttributes;
 import io.netty.channel.Channel;
 import io.netty.channel.local.LocalChannel;
@@ -59,6 +61,8 @@ public final class HyperConduitServerEvents {
 
     @SubscribeEvent
     public static void updateWatchers(ServerTickEvent.Post event) {
+        WATCHERS.removeIf(source -> source.getPlayer() != null
+                && (!source.getPlayer().connection.isAcceptingMessages() || !source.hasPermission(2)));
         if (++watchTicks < 20 || WATCHERS.isEmpty()) return;
         watchTicks = 0;
         List<String> lines = statusLines(event.getServer());
@@ -77,12 +81,13 @@ public final class HyperConduitServerEvents {
     public static List<String> statusLines(MinecraftServer server) {
         HyperConduitConfig config = ConfigHolder.get();
         List<String> lines = new ArrayList<>();
-        lines.add("[HyperConduit] 服务端 | " + configStatus(config));
+        lines.add("[HyperConduit] 服务端配置（下次监听应用） | " + configStatus(config));
         if (server == null) return lines;
 
         int tunnels = 0, vanilla = 0, local = 0;
         for (ServerPlayer player : server.getPlayerList().getPlayers()) {
             Channel channel = player.connection.getConnection().channel();
+            if (channel == null || !channel.isActive()) continue;
             if (channel instanceof LocalChannel) {
                 local++;
                 continue;
@@ -94,9 +99,11 @@ public final class HyperConduitServerEvents {
             tunnels++;
             InetSocketAddress peer = channel.attr(TunnelAttributes.PEER).get();
             lines.add("§b[HyperConduit]§r §f[" + player.getGameProfile().getName() + "]§r"
-                    + " §a隧道§r §7源 " + sourceAddress(peer));
+                    + " §a隧道§r §7源 " + sourceAddress(peer) + "§r | "
+                    + TelemetryText.describe(TunnelMetrics.connection(channel)));
         }
         lines.add("[HyperConduit] 总计 | 隧道 " + tunnels + " | 原版TCP " + vanilla + " | 本地 " + local);
+        if (tunnels > 0) lines.add("[HyperConduit] 速率为本端 QUIC 连接统计，含协议开销与重传；共享连接不代表逐玩家有效载荷。");
         return lines;
     }
 

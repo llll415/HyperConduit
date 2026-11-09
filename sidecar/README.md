@@ -119,6 +119,8 @@ Java 接入使用内部 `bridgeToken` 启用私有 MC 元数据前言，并以 `
 
 `probe` 是 Java 列表发现专用的复用工作进程，stdin/stdout 使用有界 NDJSON 请求/结果，支持取消和 EOF 退出。它仅查询 `GET https://hyperconduit/capability`，不加载配置/口令、不读写信任文件，也不建立游戏转发流。探测使用未认证的服务器身份，只能用于提示；正式连接的 TLS/TOFU 和 token 校验不受影响。端点返回固定的 `{protocol,enabled}`，每条 QUIC 连接仅接受一次能力请求。
 
+受管 client/server 可通过 stdin `{ "version":1, "command":"observe" }` 订阅每秒指标。stdout `stats` 只包含有界活动连接 ID、本端实际发送 CC/Brutal 目标、平滑 RTT 和传输字节计数，不含地址、口令、pin 或游戏数据。样本以进程内单调时间标记；速率由 Java 对连续样本求差，不新增统计 HTTP 服务。未订阅时维持原 ready/error 协议，独立非受管模式不输出指标。
+
 ## 限额与超时
 
 - `maxConnections` 默认 64：服务端限制 QUIC 连接数并限制全局后端连接；客户端限制本地连接。

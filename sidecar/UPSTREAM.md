@@ -112,3 +112,12 @@ git rev-parse 832a525:sidecar/hy2-core
 - `probe` CLI 工作进程提供有界队列、4 个 worker、取消及 stdin EOF 清理，Java 单个列表会话复用一个进程；与正式 client/server 生命周期独立。
 - 保留 HY2 原生鉴权、带宽协商和 TCP framing；不添加伪装、通用代理或统计 HTTP 服务。
 - 第 7 步最终自动回归：sidecar 415 个测试/子测试通过、1 平台跳过；core 151 通过，无失败；两模块 `go vet` 和依赖校验通过。Java runtime 86 通过/1 跳过、mod-common 39 通过、旧 Java core 171 通过；未做本阶段游戏内验收。
+
+## 第 8 步实际指标通道
+
+- 未改动 core 的拥塞算法或 `observe.Connection`；保留 `TrafficLogger`、连接 observer 及事件接口。指标直接来自已有 QUIC `ConnectionStats` 和实际本端发送控制器，不通过 MC 流量计数推测 RTT/丢包。
+- 受管 client/server 可选订阅 `observe`，每秒在既有 stdout 输出有界 `stats`：最多 128 条活动连接、单行 64KiB；只含连接 ID、发送 CC/目标、平滑 RTT 和累计传输字节，不含地址/凭据/游戏载荷。
+- Java 以 Go 单调采样间隔计算字节差速率；首帧、计数回退、过期间隔后的首帧不显示速率，3.5 秒无新样本失效。异常指标仅使指标不可用，不主动中断游戏传输。
+- MC 来源按每 listener 的 sidecar 与受信 connection ID 关联；客户端进程只有单条 QUIC 连接。不同进程的相同 ID 不会混用。
+- 未增加 HTTP stats 服务、管理端口或独立后端；所有游戏内显示及联机验收由用户最后统一执行。
+- 自动回归：Go sidecar 448 个测试/子测试通过、1 平台跳过，静态检查/依赖校验通过；Java runtime 104 通过/1 跳过、mod-common 57、旧 core 171 通过，NeoForge jar 成功。core 本步未修改，最近回归为第 7 步 151 通过。

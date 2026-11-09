@@ -1,6 +1,7 @@
 package io.hyperconduit.mod.mixin.server;
 
 import io.hyperconduit.mod.bridge.TunnelService;
+import io.hyperconduit.mod.bridge.TunnelMetrics;
 import io.hyperconduit.mod.config.ConfigHolder;
 import io.hyperconduit.mod.config.HyperConduitConfig;
 import io.hyperconduit.sidecar.BridgeInitializer;
@@ -51,13 +52,17 @@ public abstract class ServerConnectionListenerMixin implements io.hyperconduit.m
             byte[] random = new byte[32];
             new SecureRandom().nextBytes(random);
             String secret = HexFormat.of().formatHex(random);
+            var processRef = new java.util.concurrent.atomic.AtomicReference<SidecarProcess>();
+            var bridge = new BridgeInitializer(secret, bootstrap.config().childHandler());
             ServerBootstrap privateBootstrap = bootstrap.clone()
-                    .childHandler(new BridgeInitializer(secret, bootstrap.config().childHandler()))
+                    .childHandler(TunnelMetrics.serverInitializer(bridge, processRef))
                     .localAddress(new InetSocketAddress(InetAddress.getByName("127.0.0.1"), 0));
             backend = privateBootstrap.bind().syncUninterruptibly();
             InetSocketAddress udp = new InetSocketAddress(requested.getAddress(), port);
             child = TunnelService.server(config, udp, (InetSocketAddress) backend.channel().localAddress(), secret);
             child.ready().get(config.connectTimeoutMs + 6000L, TimeUnit.MILLISECONDS);
+            processRef.set(child);
+            child.enableTelemetry();
             hyperconduit$backends.add(backend);
             hyperconduit$children.add(child);
             ChannelFuture ownedBackend = backend;

@@ -84,6 +84,14 @@ func runWithInput(ctx context.Context, args []string, stdin io.Reader, stdout, s
 }
 
 func runEndpoint(ctx context.Context, mode string, c config.Config, stdout io.Writer) error {
+	return runEndpointObserved(ctx, mode, c, stdout, nil)
+}
+
+// runEndpointObserved is runEndpoint with an optional opt-in stats stream. A
+// nil observe channel keeps the non-managed and legacy paths telemetry-free.
+// Ready and stats are written by this same goroutine, so stdout has exactly one
+// writer and the two event kinds can never interleave.
+func runEndpointObserved(ctx context.Context, mode string, c config.Config, stdout io.Writer, observe <-chan struct{}) error {
 	var endpoint *tunnel.Endpoint
 	var err error
 	if mode == "client" {
@@ -104,7 +112,15 @@ func runEndpoint(ctx context.Context, mode string, c config.Config, stdout io.Wr
 	}{1, "ready", mode, endpoint.Addr().String(), endpoint.Fingerprint()}); err != nil {
 		return errors.New("cannot write ready event")
 	}
-	return endpoint.Wait()
+	if observe == nil {
+		return endpoint.Wait()
+	}
+	// Endpoint.Wait blocks, so a small waiter lets the stats loop also react to
+	// endpoint exit and cancellation. The channel is buffered, so the waiter
+	// always finishes even when the loop returns first.
+	endpointDone := make(chan error, 1)
+	go func() { endpointDone <- endpoint.Wait() }()
+	return streamTelemetry(ctx, endpoint, endpointDone, observe, stdout)
 }
 
 func runTrust(ctx context.Context, args []string, stdout, stderr io.Writer) error {

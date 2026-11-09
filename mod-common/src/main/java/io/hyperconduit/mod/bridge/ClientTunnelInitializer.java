@@ -37,7 +37,10 @@ public final class ClientTunnelInitializer extends ChannelInitializer<Channel> {
         }
 
         @Override public void handlerAdded(ChannelHandlerContext ctx) {
-            ctx.channel().closeFuture().addListener(future -> stop());
+            ctx.channel().closeFuture().addListener(future -> {
+                ctx.channel().attr(TunnelMetrics.SOURCE).set(null);
+                stop();
+            });
         }
 
         private void stop() {
@@ -65,6 +68,9 @@ public final class ClientTunnelInitializer extends ChannelInitializer<Channel> {
                         if (canceled.get() || promise.isCancelled() || !ctx.channel().isOpen()) { stop(); return; }
                         ctx.channel().attr(TunnelAttributes.PEER).set(target);
                         ctx.channel().attr(TunnelAttributes.TUNNEL).set(true);
+                        ctx.channel().attr(TunnelMetrics.SOURCE).set(process::telemetry);
+                        ctx.channel().attr(TunnelMetrics.CLIENT).set(true);
+                        process.enableTelemetry();
                         // The original optional local bind may target an external
                         // interface; the bridge must use a compatible loopback bind.
                         ctx.connect(ready.listen(), null, promise);
