@@ -2,6 +2,7 @@ package io.hyperconduit.mod.mixin.client;
 
 import io.hyperconduit.mod.bridge.ClientTunnelInitializer;
 import io.hyperconduit.mod.bridge.ConnectionIdentity;
+import io.hyperconduit.mod.bridge.ConnectionAttemptScope;
 import io.hyperconduit.mod.bridge.ResolvedEndpoint;
 import io.hyperconduit.mod.config.ConfigHolder;
 import io.hyperconduit.mod.config.HyperConduitConfig;
@@ -30,7 +31,8 @@ public abstract class ConnectionClientMixin {
             at = @At(value = "INVOKE", target = "Lio/netty/bootstrap/Bootstrap;handler(Lio/netty/channel/ChannelHandler;)Lio/netty/bootstrap/AbstractBootstrap;"))
     private static AbstractBootstrap hyperconduit$wrapInitializer(Bootstrap bootstrap, ChannelHandler initializer,
                                                                   InetSocketAddress target, boolean epoll, Connection connection) {
-        HyperConduitConfig config = ConfigHolder.get();
+        HyperConduitConfig config = ConnectionAttemptScope.snapshot();
+        if (config == null) config = ConfigHolder.get();
         if (config == null || !config.enabled || io.hyperconduit.mod.probe.StatusProbeScope.active()) return bootstrap.handler(initializer);
         String endpoint = ((ConnectionIdentity) connection).hyperconduit$endpoint();
         return bootstrap.handler(new ClientTunnelInitializer(initializer, config.copy(), endpoint));

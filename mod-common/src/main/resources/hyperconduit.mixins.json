@@ -17,7 +17,8 @@
     "client.StatusResponseListenerMixin",
     "client.ServerEntryMixin",
     "client.MultiplayerDiscoveryMixin",
-    "client.ConnectionClientMixin"
+    "client.ConnectionClientMixin",
+    "client.ConnectScreenTransportMixin"
   ],
   "injectors": {
     "defaultRequire": 1
