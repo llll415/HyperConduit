@@ -9,6 +9,7 @@ import (
 	"math/rand"
 	"net"
 	"net/http"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -27,6 +28,11 @@ import (
 const (
 	closeErrCodeOK                  = 0x100 // HTTP3 ErrCodeNoError
 	closeErrCodeTrafficLimitReached = 0x107 // HTTP3 ErrCodeExcessiveLoad
+
+	// Capability discovery uses a fixed authority so it is independent of the
+	// real server address and cannot be confused with an authenticated request.
+	capabilityHost = "hyperconduit"
+	capabilityPath = "/capability"
 )
 
 type Server interface {
@@ -54,6 +60,11 @@ func convertToStdTLSConfig(config *Config) *tls.Config {
 func NewServer(config *Config) (Server, error) {
 	if err := config.fill(); err != nil {
 		return nil, err
+	}
+	// The response is fixed for the lifetime of the server. Copy it so a caller
+	// mutating its slice cannot race with capability requests.
+	if len(config.CapabilityResponse) > 0 {
+		config.CapabilityResponse = append([]byte(nil), config.CapabilityResponse...)
 	}
 	tlsConfig := convertToStdTLSConfig(config)
 	quicConfig := &quic.Config{
@@ -234,14 +245,18 @@ type h3sHandler struct {
 	conn   *quic.Conn
 
 	authenticated atomic.Bool
-	authMutex     sync.Mutex
-	authID        string
-	connID        uint32 // a random id for dump streams
-	authTimer     *time.Timer
-	streams       sync.WaitGroup
-	streamMutex   sync.Mutex
-	closing       bool
-	observation   *observe.Connection
+	// capabilityServed bounds unauthenticated capability requests to one per
+	// connection, so a single QUIC connection cannot be used as a free request
+	// amplifier. The probe client uses a fresh connection per check.
+	capabilityServed atomic.Bool
+	authMutex        sync.Mutex
+	authID           string
+	connID           uint32 // a random id for dump streams
+	authTimer        *time.Timer
+	streams          sync.WaitGroup
+	streamMutex      sync.Mutex
+	closing          bool
+	observation      *observe.Connection
 
 	udpSM *udpSessionManager // Only set after authentication
 }
@@ -255,6 +270,18 @@ func newH3sHandler(config *Config, conn *quic.Conn) *h3sHandler {
 }
 
 func (h *h3sHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// Capability discovery is intentionally readable before authentication. It
+	// only writes the fixed configured document: it never authenticates the
+	// connection, reads a token/identity, opens a TCP stream, or dials a backend.
+	if r.Method == http.MethodGet && r.Host == capabilityHost &&
+		r.URL.Path == capabilityPath && r.URL.RawQuery == "" && !r.URL.ForceQuery {
+		if !h.capabilityServed.CompareAndSwap(false, true) {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		h.handleCapability(w)
+		return
+	}
 	if r.Method == http.MethodPost && r.Host == protocol.URLHost && r.URL.Path == protocol.URLPath {
 		h.authMutex.Lock()
 		defer h.authMutex.Unlock()
@@ -495,6 +522,21 @@ func (h *h3sHandler) handleTCPRequest(stream *utils.QStream) {
 	if err == errDisconnect {
 		_ = h.conn.CloseWithError(closeErrCodeTrafficLimitReached, "")
 	}
+}
+
+// handleCapability serves the fixed public capability document. An unset or
+// empty document is reported as 404 so probes classify the endpoint as
+// undeclared rather than mistaking a masquerade page for a declaration.
+func (h *h3sHandler) handleCapability(w http.ResponseWriter) {
+	body := h.config.CapabilityResponse
+	if len(body) == 0 {
+		w.WriteHeader(http.StatusNotFound)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Content-Length", strconv.Itoa(len(body)))
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(body)
 }
 
 func (h *h3sHandler) masqHandler(w http.ResponseWriter, r *http.Request) {

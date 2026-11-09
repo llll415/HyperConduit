@@ -24,6 +24,7 @@ const (
 	defaultMaxIdleTimeout      = 30 * time.Second
 	defaultMaxIncomingStreams  = 1024
 	defaultUDPIdleTimeout      = 60 * time.Second
+	maxCapabilityResponseBytes = 1024
 )
 
 type Config struct {
@@ -46,6 +47,10 @@ type Config struct {
 	// HyperConduit: optional transport admission and TCP request bounds.
 	MaxConnections int
 	RequestTimeout time.Duration
+	// CapabilityResponse is served verbatim at GET https://hyperconduit/capability
+	// before authentication. It must be a bounded, fixed JSON document; the server
+	// never adds credentials or identity to it. Nil or empty means undeclared.
+	CapabilityResponse []byte
 	// ConnectionObserver is called synchronously at authenticated connect and
 	// disconnect. Implementations must be thread-safe, brief and non-blocking.
 	ConnectionObserver func(connection *observe.Connection, online bool)
@@ -126,6 +131,12 @@ func (c *Config) fill() error {
 	}
 	if c.Authenticator == nil {
 		return errors.ConfigError{Field: "Authenticator", Reason: "must be set"}
+	}
+	if len(c.CapabilityResponse) > maxCapabilityResponseBytes {
+		return errors.ConfigError{
+			Field:  "CapabilityResponse",
+			Reason: "must be at most 1024 bytes",
+		}
 	}
 	return nil
 }

@@ -5,10 +5,18 @@
   "minVersion": "0.8",
   "mixins": [
     "ConnectionAddressMixin",
+    "ServerStatusMixin",
+    "StatusPacketMixin",
+    "server.MinecraftServerStatusMixin",
     "server.ServerConnectionListenerMixin"
   ],
   "client": [
     "client.ServerNameResolverMixin",
+    "client.ServerDataMixin",
+    "client.ServerStatusPingerMixin",
+    "client.StatusResponseListenerMixin",
+    "client.ServerEntryMixin",
+    "client.MultiplayerDiscoveryMixin",
     "client.ConnectionClientMixin"
   ],
   "injectors": {

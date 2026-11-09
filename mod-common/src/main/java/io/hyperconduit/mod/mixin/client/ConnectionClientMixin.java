@@ -31,7 +31,7 @@ public abstract class ConnectionClientMixin {
     private static AbstractBootstrap hyperconduit$wrapInitializer(Bootstrap bootstrap, ChannelHandler initializer,
                                                                   InetSocketAddress target, boolean epoll, Connection connection) {
         HyperConduitConfig config = ConfigHolder.get();
-        if (config == null || !config.enabled) return bootstrap.handler(initializer);
+        if (config == null || !config.enabled || io.hyperconduit.mod.probe.StatusProbeScope.active()) return bootstrap.handler(initializer);
         String endpoint = ((ConnectionIdentity) connection).hyperconduit$endpoint();
         return bootstrap.handler(new ClientTunnelInitializer(initializer, config.copy(), endpoint));
     }

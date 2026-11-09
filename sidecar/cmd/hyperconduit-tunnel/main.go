@@ -50,6 +50,12 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 // runWithInput is the testable entry point. Managed mode reads control input
 // from stdin; the non-managed path never touches it.
 func runWithInput(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer) error {
+	if len(args) > 0 && args[0] == "probe" {
+		if len(args) != 1 {
+			return errors.New("usage: hyperconduit-tunnel probe")
+		}
+		return runProbe(ctx, stdin, stdout)
+	}
 	if len(args) > 0 && args[0] == "trust" {
 		return runTrust(ctx, args[1:], stdout, stderr)
 	}

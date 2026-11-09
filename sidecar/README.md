@@ -117,6 +117,8 @@ Java 管理时使用 `--managed`：stdin 接收 `{"version":1,"command":"shutdow
 
 Java 接入使用内部 `bridgeToken` 启用私有 MC 元数据前言，并以 `serverEndpoint` 保留用户选择的信任地址。普通独立转发无需设置这两个字段；不要在公网普通 MC TCP 上启用来源头信任。
 
+`probe` 是 Java 列表发现专用的复用工作进程，stdin/stdout 使用有界 NDJSON 请求/结果，支持取消和 EOF 退出。它仅查询 `GET https://hyperconduit/capability`，不加载配置/口令、不读写信任文件，也不建立游戏转发流。探测使用未认证的服务器身份，只能用于提示；正式连接的 TLS/TOFU 和 token 校验不受影响。端点返回固定的 `{protocol,enabled}`，每条 QUIC 连接仅接受一次能力请求。
+
 ## 限额与超时
 
 - `maxConnections` 默认 64：服务端限制 QUIC 连接数并限制全局后端连接；客户端限制本地连接。

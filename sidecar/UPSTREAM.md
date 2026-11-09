@@ -104,3 +104,11 @@ git rev-parse 832a525:sidecar/hy2-core
 - `serverEndpoint` 将用户选择的信任端点与解析后的网络目标分开；MC 握手不使用桥接地址。
 - Windows 本机启动 NeoForge 1.21.1：共存 TCP/QUIC status 及仅隧道 QUIC status 通过；仅隧道普通 TCP 不可用；两次使用 RCON stop 正常关闭。未完成真实客户端登录、跑图、LAN 或公网验证。
 - 自动回归：Java runtime 60 通过/1 POSIX 跳过、mod-common 26 通过、旧 core 171 通过；Go sidecar 364 个测试/子测试通过、1 Unix 权限用例跳过、0 失败，静态检查和依赖校验通过。报告位于本机临时目录 `opencode/hyperconduit-sidecar-step6-tests.jsonl`。
+
+## 第 7 步能力发现补丁
+
+- core `server.Config.CapabilityResponse` 提供最多 1024B 的固定公开声明，限于 `GET https://hyperconduit/capability`；每条 QUIC 连接最多一次，不改变 authenticated 状态，不调用 Authenticator/Outbound，不发放 TCP stream 权限。
+- 独立 `internal/probe` 使用 HTTP/3 查询该端点，限制响应头/响应体和超时；TLS 身份未认证，结果仅供发现，不传 token、不读写 TOFU。未响应标未知，不能据此断言未安装。
+- `probe` CLI 工作进程提供有界队列、4 个 worker、取消及 stdin EOF 清理，Java 单个列表会话复用一个进程；与正式 client/server 生命周期独立。
+- 保留 HY2 原生鉴权、带宽协商和 TCP framing；不添加伪装、通用代理或统计 HTTP 服务。
+- 第 7 步最终自动回归：sidecar 415 个测试/子测试通过、1 平台跳过；core 151 通过，无失败；两模块 `go vet` 和依赖校验通过。Java runtime 86 通过/1 跳过、mod-common 39 通过、旧 Java core 171 通过；未做本阶段游戏内验收。

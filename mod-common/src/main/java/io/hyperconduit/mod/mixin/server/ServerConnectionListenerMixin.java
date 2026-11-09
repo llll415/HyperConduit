@@ -24,9 +24,13 @@ import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.TimeUnit;
 
 @Mixin(ServerConnectionListener.class)
-public abstract class ServerConnectionListenerMixin {
+public abstract class ServerConnectionListenerMixin implements io.hyperconduit.mod.probe.TunnelListenerState {
     @Unique private final List<ChannelFuture> hyperconduit$backends = new CopyOnWriteArrayList<>();
     @Unique private final List<SidecarProcess> hyperconduit$children = new CopyOnWriteArrayList<>();
+
+    @Override public boolean hyperconduit$acceptsTunnels() {
+        return hyperconduit$children.stream().anyMatch(SidecarProcess::isAlive);
+    }
 
     @Redirect(method = "startTcpServerListener(Ljava/net/InetAddress;I)V",
             at = @At(value = "INVOKE", target = "Lio/netty/bootstrap/ServerBootstrap;bind()Lio/netty/channel/ChannelFuture;"))

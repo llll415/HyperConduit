@@ -19,6 +19,11 @@ import (
 	"github.com/llll415/HyperConduit/sidecar/internal/privatefile"
 )
 
+// capabilityResponse is the fixed, public declaration served before
+// authentication. It is intentionally a compile-time constant: probing must not
+// depend on server configuration, credentials, or identity.
+const capabilityResponse = `{"protocol":1,"enabled":true}`
+
 // Endpoint owns every socket and copy loop created for one role. No reconnect or
 // direct-TCP fallback is performed. READY only describes this endpoint's listener.
 type Endpoint struct {
@@ -115,6 +120,7 @@ func openServer(parent context.Context, raw config.Config) (*Endpoint, error) {
 		IgnoreClientBandwidth: c.DisableBrutal,
 		RequestTimeout:        time.Duration(c.RequestTimeoutMS) * time.Millisecond,
 		MaxConnections:        c.MaxConnections,
+		CapabilityResponse:    []byte(capabilityResponse),
 		ConnectionObserver:    status.connection,
 		ErrorObserver:         func(err error) { status.record(classifyError("request", err)) },
 	})
