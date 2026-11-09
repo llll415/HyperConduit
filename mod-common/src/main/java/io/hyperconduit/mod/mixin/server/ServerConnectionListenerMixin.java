@@ -8,10 +8,12 @@ import io.hyperconduit.sidecar.BridgeInitializer;
 import io.hyperconduit.sidecar.SidecarProcess;
 import io.netty.bootstrap.ServerBootstrap;
 import io.netty.channel.ChannelFuture;
+import io.netty.channel.ChannelOption;
 import net.minecraft.server.network.ServerConnectionListener;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Unique;
 import org.spongepowered.asm.mixin.injection.At;
+import org.spongepowered.asm.mixin.injection.Group;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.Redirect;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
@@ -33,13 +35,37 @@ public abstract class ServerConnectionListenerMixin implements io.hyperconduit.m
         return hyperconduit$children.stream().anyMatch(SidecarProcess::isAlive);
     }
 
+    /**
+     * Vanilla NeoForge keeps the bind call in {@code startTcpServerListener}. Youer/Paper
+     * moves it into {@code bind(SocketAddress)}, so one call-site selector alone would scan
+     * zero targets on one of the two runtimes. Both hooks share a group so exactly one must
+     * install; a silent miss or a double hook aborts startup instead of disabling the tunnel.
+     */
+    @Group(name = "hyperconduit_bind", min = 1, max = 1)
     @Redirect(method = "startTcpServerListener(Ljava/net/InetAddress;I)V",
-            at = @At(value = "INVOKE", target = "Lio/netty/bootstrap/ServerBootstrap;bind()Lio/netty/channel/ChannelFuture;"))
-    private ChannelFuture hyperconduit$bind(ServerBootstrap bootstrap) throws Exception {
+            at = @At(value = "INVOKE", target = "Lio/netty/bootstrap/ServerBootstrap;bind()Lio/netty/channel/ChannelFuture;"),
+            require = 0)
+    private ChannelFuture hyperconduit$bindVanilla(ServerBootstrap bootstrap) throws Exception {
+        return hyperconduit$bindInternal(bootstrap);
+    }
+
+    @Group(name = "hyperconduit_bind", min = 1, max = 1)
+    @Redirect(method = "bind(Ljava/net/SocketAddress;)V",
+            at = @At(value = "INVOKE", target = "Lio/netty/bootstrap/ServerBootstrap;bind()Lio/netty/channel/ChannelFuture;"),
+            require = 0, remap = false)
+    private ChannelFuture hyperconduit$bindYouer(ServerBootstrap bootstrap) throws Exception {
+        return hyperconduit$bindInternal(bootstrap);
+    }
+
+    @Unique
+    private ChannelFuture hyperconduit$bindInternal(ServerBootstrap bootstrap) throws Exception {
         HyperConduitConfig current = ConfigHolder.get();
         if (current == null || !current.enabled) return bootstrap.bind();
         HyperConduitConfig config = current.copy();
-        InetSocketAddress requested = (InetSocketAddress) bootstrap.config().localAddress();
+        // Youer's bind(SocketAddress) also serves Unix-domain sockets; only tunnel TCP.
+        if (!(bootstrap.config().localAddress() instanceof InetSocketAddress requested)) {
+            return bootstrap.bind();
+        }
         if (config.disableVanillaTcp && requested.getPort() == 0) {
             throw new java.io.IOException("HyperConduit tunnel-only mode requires a fixed advertised port");
         }
@@ -54,8 +80,12 @@ public abstract class ServerConnectionListenerMixin implements io.hyperconduit.m
             String secret = HexFormat.of().formatHex(random);
             var processRef = new java.util.concurrent.atomic.AtomicReference<SidecarProcess>();
             var bridge = new BridgeInitializer(secret, bootstrap.config().childHandler());
+            // Youer sets AUTO_READ=false on the public listener and re-enables it from
+            // acceptConnections(); our private backend is not in its channel list, so it
+            // must accept on its own. clone() otherwise preserves Paper's options.
             ServerBootstrap privateBootstrap = bootstrap.clone()
                     .childHandler(TunnelMetrics.serverInitializer(bridge, processRef))
+                    .option(ChannelOption.AUTO_READ, true)
                     .localAddress(new InetSocketAddress(InetAddress.getByName("127.0.0.1"), 0));
             backend = privateBootstrap.bind().syncUninterruptibly();
             InetSocketAddress udp = new InetSocketAddress(requested.getAddress(), port);

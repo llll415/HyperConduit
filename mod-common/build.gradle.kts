@@ -25,6 +25,10 @@ dependencies {
     // Minecraft supplies Netty at runtime. Tests that build a real Bootstrap/EmbeddedChannel need
     // the same version on the test classpath without packaging it.
     testImplementation("io.netty:netty-transport:4.1.97.Final")
+    // Test-only: read the compiled mixin and offline listener fixtures to verify the two
+    // runtime-specific bind call sites. Neither library is packaged.
+    testImplementation("org.spongepowered:mixin:0.8.7")
+    testImplementation("org.ow2.asm:asm:9.7.1")
 }
 
 neoForge {
