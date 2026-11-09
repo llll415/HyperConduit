@@ -75,9 +75,7 @@ func NewServer(config *Config) (Server, error) {
 		MaxIdleTimeout:                 config.QUICConfig.MaxIdleTimeout,
 		MaxIncomingStreams:             config.QUICConfig.MaxIncomingStreams,
 		DisablePathMTUDiscovery:        config.QUICConfig.DisablePathMTUDiscovery,
-		EnableDatagrams:                true,
-		MaxDatagramFrameSize:           protocol.MaxDatagramFrameSize,
-		AssumePeerMaxDatagramFrameSize: protocol.MaxDatagramFrameSize,
+		EnableDatagrams:                false,
 		DisablePathManager:             true,
 	}
 	if config.RequestTimeout > 0 {
@@ -257,8 +255,6 @@ type h3sHandler struct {
 	streamMutex      sync.Mutex
 	closing          bool
 	observation      *observe.Connection
-
-	udpSM *udpSessionManager // Only set after authentication
 }
 
 func newH3sHandler(config *Config, conn *quic.Conn) *h3sHandler {
@@ -291,7 +287,7 @@ func (h *h3sHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if h.authenticated.Load() {
 			// Already authenticated
 			protocol.AuthResponseToHeader(w.Header(), protocol.AuthResponse{
-				UDPEnabled: !h.config.DisableUDP,
+				UDPEnabled: false,
 				Rx:         h.config.BandwidthConfig.MaxRx,
 				RxAuto:     h.config.IgnoreClientBandwidth,
 			})
@@ -324,7 +320,7 @@ func (h *h3sHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 			// Auth OK, send response
 			protocol.AuthResponseToHeader(w.Header(), protocol.AuthResponse{
-				UDPEnabled: !h.config.DisableUDP,
+				UDPEnabled: false,
 				Rx:         h.config.BandwidthConfig.MaxRx,
 				RxAuto:     h.config.IgnoreClientBandwidth,
 			})
@@ -348,27 +344,13 @@ func (h *h3sHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			if el := h.config.EventLogger; el != nil {
 				el.Connect(h.conn.RemoteAddr(), id, actualTx)
 			}
-			// Initialize UDP session manager (if UDP is enabled)
-			// We use sync.Once to make sure that only one goroutine is started,
-			// as ServeHTTP may be called by multiple goroutines simultaneously
-			if !h.config.DisableUDP {
-				go func() {
-					sm := newUDPSessionManager(
-						&udpIOImpl{h.conn, id, h.config.TrafficLogger, h.config.RequestHook, h.config.Outbound},
-						&udpEventLoggerImpl{h.conn, id, h.config.EventLogger},
-						h.config.UDPIdleTimeout,
-					)
-					h.udpSM = sm
-					go sm.Run()
-				}()
-			}
 		} else {
-			// Auth failed, pretend to be a normal HTTP server
-			h.masqHandler(w, r)
+			// Authentication failures have a fixed, non-configurable response.
+			h.notFound(w, r)
 		}
 	} else {
-		// Not an auth request, pretend to be a normal HTTP server
-		h.masqHandler(w, r)
+		// There are no generic HTTP or masquerade routes.
+		h.notFound(w, r)
 	}
 }
 
@@ -438,25 +420,6 @@ func (h *h3sHandler) handleTCPRequest(stream *utils.QStream) {
 		return
 	}
 	streamStats.ReqAddr.Store(reqAddr)
-	// Call the hook if set
-	var putback []byte
-	var hooked bool
-	if h.config.RequestHook != nil {
-		hooked = h.config.RequestHook.Check(false, reqAddr)
-		// When the hook is enabled, the server should always accept a connection
-		// so that the client will send whatever request the hook wants to see.
-		// This is essentially a server-side fast-open.
-		if hooked {
-			streamStats.State.Store(StreamStateHooking)
-			_ = protocol.WriteTCPResponse(stream, true, "RequestHook enabled")
-			putback, err = h.config.RequestHook.TCP(stream, &reqAddr)
-			if err != nil {
-				_ = stream.Close()
-				return
-			}
-			streamStats.setHookedReqAddr(reqAddr)
-		}
-	}
 	// Log the event
 	if h.config.EventLogger != nil {
 		h.config.EventLogger.TCPRequest(h.conn.RemoteAddr(), h.authID, reqAddr)
@@ -482,9 +445,7 @@ func (h *h3sHandler) handleTCPRequest(stream *utils.QStream) {
 		tConn, err = h.config.Outbound.TCP(reqAddr)
 	}
 	if err != nil {
-		if !hooked {
-			_ = protocol.WriteTCPResponse(stream, false, err.Error())
-		}
+		_ = protocol.WriteTCPResponse(stream, false, "target unavailable")
 		_ = stream.Close()
 		// Log the error
 		if h.config.EventLogger != nil {
@@ -493,18 +454,11 @@ func (h *h3sHandler) handleTCPRequest(stream *utils.QStream) {
 		return
 	}
 	defer tConn.Close()
-	if !hooked {
-		if err := protocol.WriteTCPResponse(stream, true, "Connected"); err != nil {
-			return
-		}
+	if err := protocol.WriteTCPResponse(stream, true, "Connected"); err != nil {
+		return
 	}
 	_ = stream.SetDeadline(time.Time{})
 	streamStats.State.Store(StreamStateEstablished)
-	// Put back the data if the hook requested
-	if len(putback) > 0 {
-		n, _ := tConn.Write(putback)
-		streamStats.Tx.Add(uint64(n))
-	}
 	// Start proxying
 	if trafficLogger != nil {
 		err = copyTwoWayEx(h.authID, stream, tConn, trafficLogger, streamStats)
@@ -526,7 +480,7 @@ func (h *h3sHandler) handleTCPRequest(stream *utils.QStream) {
 
 // handleCapability serves the fixed public capability document. An unset or
 // empty document is reported as 404 so probes classify the endpoint as
-// undeclared rather than mistaking a masquerade page for a declaration.
+// undeclared rather than mistaking an unrelated page for a declaration.
 func (h *h3sHandler) handleCapability(w http.ResponseWriter) {
 	body := h.config.CapabilityResponse
 	if len(body) == 0 {
@@ -539,95 +493,7 @@ func (h *h3sHandler) handleCapability(w http.ResponseWriter) {
 	_, _ = w.Write(body)
 }
 
-func (h *h3sHandler) masqHandler(w http.ResponseWriter, r *http.Request) {
-	if h.config.MasqHandler != nil {
-		h.config.MasqHandler.ServeHTTP(w, r)
-	} else {
-		// Return 404 for everything
-		http.NotFound(w, r)
-	}
-}
-
-// udpIOImpl is the IO implementation for udpSessionManager with TrafficLogger support
-type udpIOImpl struct {
-	Conn          *quic.Conn
-	AuthID        string
-	TrafficLogger TrafficLogger
-	RequestHook   RequestHook
-	Outbound      Outbound
-}
-
-func (io *udpIOImpl) ReceiveMessage() (*protocol.UDPMessage, error) {
-	for {
-		msg, err := io.Conn.ReceiveDatagram(context.Background())
-		if err != nil {
-			// Connection error, this will stop the session manager
-			return nil, err
-		}
-		udpMsg, err := protocol.ParseUDPMessage(msg)
-		if err != nil {
-			// Invalid message, this is fine - just wait for the next
-			continue
-		}
-		if io.TrafficLogger != nil {
-			ok := io.TrafficLogger.LogTraffic(io.AuthID, uint64(len(udpMsg.Data)), 0)
-			if !ok {
-				// TrafficLogger requested to disconnect the client
-				_ = io.Conn.CloseWithError(closeErrCodeTrafficLimitReached, "")
-				return nil, errDisconnect
-			}
-		}
-		return udpMsg, nil
-	}
-}
-
-func (io *udpIOImpl) SendMessage(buf []byte, msg *protocol.UDPMessage) error {
-	if io.TrafficLogger != nil {
-		ok := io.TrafficLogger.LogTraffic(io.AuthID, 0, uint64(len(msg.Data)))
-		if !ok {
-			// TrafficLogger requested to disconnect the client
-			_ = io.Conn.CloseWithError(closeErrCodeTrafficLimitReached, "")
-			return errDisconnect
-		}
-	}
-	msgN := msg.Serialize(buf)
-	if msgN < 0 {
-		// Message larger than buffer, silent drop
-		return nil
-	}
-	return io.Conn.SendDatagram(buf[:msgN])
-}
-
-func (io *udpIOImpl) Hook(packets [][]byte, reqAddr *string) (bool, error) {
-	if io.RequestHook != nil && io.RequestHook.Check(true, *reqAddr) {
-		return io.RequestHook.UDP(packets, reqAddr)
-	} else {
-		return true, nil
-	}
-}
-
-func (io *udpIOImpl) UDP(reqAddr string) (UDPConn, error) {
-	return io.Outbound.UDP(reqAddr)
-}
-
-func (io *udpIOImpl) CheckUDP(reqAddr string) error {
-	return io.Outbound.CheckUDP(reqAddr)
-}
-
-type udpEventLoggerImpl struct {
-	Conn        *quic.Conn
-	AuthID      string
-	EventLogger EventLogger
-}
-
-func (l *udpEventLoggerImpl) New(sessionID uint32, reqAddr string) {
-	if l.EventLogger != nil {
-		l.EventLogger.UDPRequest(l.Conn.RemoteAddr(), l.AuthID, sessionID, reqAddr)
-	}
-}
-
-func (l *udpEventLoggerImpl) Close(sessionID uint32, err error) {
-	if l.EventLogger != nil {
-		l.EventLogger.UDPError(l.Conn.RemoteAddr(), l.AuthID, sessionID, err)
-	}
+// notFound is the only response for unrecognized routes and failed auth.
+func (h *h3sHandler) notFound(w http.ResponseWriter, r *http.Request) {
+	http.NotFound(w, r)
 }

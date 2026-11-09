@@ -6,7 +6,6 @@ import (
 	"crypto/x509"
 	"io"
 	"net"
-	"net/http"
 	"sync/atomic"
 	"time"
 
@@ -23,7 +22,6 @@ const (
 	defaultConnReceiveWindow   = defaultStreamReceiveWindow * 5 / 2 // 20MB
 	defaultMaxIdleTimeout      = 30 * time.Second
 	defaultMaxIncomingStreams  = 1024
-	defaultUDPIdleTimeout      = 60 * time.Second
 	maxCapabilityResponseBytes = 1024
 )
 
@@ -33,17 +31,13 @@ type Config struct {
 	Conn                  net.PacketConn
 	StatelessResetKey     *quic.StatelessResetKey
 	Cleanup               io.Closer
-	RequestHook           RequestHook
 	Outbound              Outbound
 	CongestionConfig      CongestionConfig
 	BandwidthConfig       BandwidthConfig
 	IgnoreClientBandwidth bool
-	DisableUDP            bool
-	UDPIdleTimeout        time.Duration
 	Authenticator         Authenticator
 	EventLogger           EventLogger
 	TrafficLogger         TrafficLogger
-	MasqHandler           http.Handler
 	// HyperConduit: optional transport admission and TCP request bounds.
 	MaxConnections int
 	RequestTimeout time.Duration
@@ -124,11 +118,6 @@ func (c *Config) fill() error {
 	if c.BandwidthConfig.MaxRx != 0 && c.BandwidthConfig.MaxRx < 65536 {
 		return errors.ConfigError{Field: "BandwidthConfig.MaxRx", Reason: "must be at least 65536"}
 	}
-	if c.UDPIdleTimeout == 0 {
-		c.UDPIdleTimeout = defaultUDPIdleTimeout
-	} else if c.UDPIdleTimeout < 2*time.Second || c.UDPIdleTimeout > 600*time.Second {
-		return errors.ConfigError{Field: "UDPIdleTimeout", Reason: "must be between 2s and 600s"}
-	}
 	if c.Authenticator == nil {
 		return errors.ConfigError{Field: "Authenticator", Reason: "must be set"}
 	}
@@ -168,29 +157,11 @@ type CongestionConfig struct {
 	BBRProfile string
 }
 
-// RequestHook allows filtering and modifying requests before the server connects to the remote.
-// A request will only be hooked if Check returns true.
-// The returned byte slice, if not empty, will be sent to the remote before proxying - this is
-// mainly for "putting back" the content read from the client for sniffing, etc.
-// Return a non-nil error to abort the connection.
-// For UDP, the first packets of a session are held back until the hook is done with them:
-// UDP is called with all the packets held so far each time a new one arrives, and returns
-// false to wait for the next one. The hook must give up eventually, as held packets are only
-// sent (as-is, to the possibly modified reqAddr) once it returns true.
-type RequestHook interface {
-	Check(isUDP bool, reqAddr string) bool
-	TCP(stream HyStream, reqAddr *string) ([]byte, error)
-	UDP(packets [][]byte, reqAddr *string) (done bool, err error)
-}
-
-// Outbound provides the implementation of how the server should connect to remote servers.
-// Although UDP includes a reqAddr, the implementation does not necessarily have to use it
-// to make a "connected" UDP connection that does not accept packets from other addresses.
-// CheckUDP is used to check if a UDP packet to reqAddr is permitted (useful for e.g. ACL).
+// Outbound provides the implementation of how the server should connect to remote
+// TCP servers. UDP is intentionally not part of this interface: HyperConduit only
+// proxies TCP.
 type Outbound interface {
 	TCP(reqAddr string) (net.Conn, error)
-	UDP(reqAddr string) (UDPConn, error)
-	CheckUDP(reqAddr string) error
 }
 
 // ContextOutbound optionally receives trusted connection/stream metadata and a
@@ -198,13 +169,6 @@ type Outbound interface {
 // This does not replace Outbound: existing implementations remain usable.
 type ContextOutbound interface {
 	TCPContext(ctx context.Context, reqAddr string) (net.Conn, error)
-}
-
-// UDPConn is like net.PacketConn, but uses string for addresses.
-type UDPConn interface {
-	ReadFrom(b []byte) (int, string, error)
-	WriteTo(b []byte, addr string) (int, error)
-	Close() error
 }
 
 // BandwidthConfig describes the maximum bandwidth that the server can use, in bytes per second.
@@ -225,8 +189,6 @@ type EventLogger interface {
 	Disconnect(addr net.Addr, id string, err error)
 	TCPRequest(addr net.Addr, id, reqAddr string)
 	TCPError(addr net.Addr, id, reqAddr string, err error)
-	UDPRequest(addr net.Addr, id string, sessionID uint32, reqAddr string)
-	UDPError(addr net.Addr, id string, sessionID uint32, err error)
 }
 
 type HyStream interface {
@@ -261,10 +223,6 @@ const (
 	// Client has opened the stream, but we have not received the proxy request yet.
 	StreamStateInitial StreamState = iota
 
-	// StreamStateHooking indicates that the hook (usually sniff) is processing.
-	// Client has sent the proxy request, but sniff requires more data to complete.
-	StreamStateHooking
-
 	// StreamStateConnecting indicates that we are connecting to the proxy target.
 	StreamStateConnecting
 
@@ -279,8 +237,6 @@ func (s StreamState) String() string {
 	switch s {
 	case StreamStateInitial:
 		return "init"
-	case StreamStateHooking:
-		return "hook"
 	case StreamStateConnecting:
 		return "connect"
 	case StreamStateEstablished:
@@ -300,17 +256,10 @@ type StreamStats struct {
 	ConnectionID uint64 // Process-local observation ID; independent of legacy dump ConnID.
 	InitialTime  time.Time
 
-	ReqAddr       utils.Atomic[string]
-	HookedReqAddr utils.Atomic[string]
+	ReqAddr utils.Atomic[string]
 
 	Tx atomic.Uint64
 	Rx atomic.Uint64
 
 	LastActiveTime utils.Atomic[time.Time]
-}
-
-func (s *StreamStats) setHookedReqAddr(addr string) {
-	if addr != s.ReqAddr.Load() {
-		s.HookedReqAddr.Store(addr)
-	}
 }

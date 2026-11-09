@@ -426,7 +426,6 @@ func directClientConfig(addr net.Addr, roots *x509.CertPool, auth string) *hycli
 			ServerName: "localhost",
 			RootCAs:    roots,
 		},
-		QUICConfig: hyclient.QUICConfig{DisableChromeParrot: true},
 	}
 }
 
@@ -692,7 +691,7 @@ func TestDirectHysteriaClientPolicy(t *testing.T) {
 	}
 	defer hy.Close()
 	if info.UDPEnabled {
-		t.Fatal("server reported UDP enabled although DisableUDP is set")
+		t.Fatal("TCP-only server advertised application UDP support")
 	}
 
 	// The only accepted service identifier is minecraft:0.
@@ -745,12 +744,6 @@ func TestDirectHysteriaClientPolicy(t *testing.T) {
 		t.Fatal("TCPContext allowed the backend address instead of the service identifier")
 	}
 
-	// UDP is disabled at the application layer.
-	udp, err := hy.UDP()
-	if err == nil {
-		_ = udp.Close()
-		t.Fatal("UDP() succeeded although the server disabled UDP")
-	}
 }
 
 func TestServerMaxConnectionsGate(t *testing.T) {
@@ -926,15 +919,6 @@ func TestFixedOutboundRejectsNonServiceTarget(t *testing.T) {
 		t.Fatal("TCP accepted a non-service target")
 	} else if !errors.Is(err, errTargetDenied) {
 		t.Fatalf("TCP error = %v, want errTargetDenied", err)
-	}
-	if c, err := o.UDP("127.0.0.1:2"); err == nil {
-		_ = c.Close()
-		t.Fatal("UDP accepted a non-service target")
-	} else if !errors.Is(err, errTargetDenied) {
-		t.Fatalf("UDP error = %v, want errTargetDenied", err)
-	}
-	if err := o.CheckUDP("127.0.0.1:2"); !errors.Is(err, errTargetDenied) {
-		t.Fatalf("CheckUDP error = %v, want errTargetDenied", err)
 	}
 }
 

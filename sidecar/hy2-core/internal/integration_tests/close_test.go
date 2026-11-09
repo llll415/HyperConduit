@@ -94,89 +94,6 @@ func TestClientServerTCPClose(t *testing.T) {
 	assert.Equal(t, "happy", string(bs))
 }
 
-// TestClientServerUDPIdleTimeout tests whether the server's UDP idle timeout works correctly.
-func TestClientServerUDPIdleTimeout(t *testing.T) {
-	// Create server
-	udpConn, udpAddr, err := serverConn()
-	assert.NoError(t, err)
-	serverOb := mocks.NewMockOutbound(t)
-	auth := mocks.NewMockAuthenticator(t)
-	auth.EXPECT().Authenticate(mock.Anything, mock.Anything, mock.Anything).Return(true, "nobody")
-	eventLogger := mocks.NewMockEventLogger(t)
-	eventLogger.EXPECT().Connect(mock.Anything, "nobody", mock.Anything).Once()
-	eventLogger.EXPECT().Disconnect(mock.Anything, "nobody", mock.Anything).Maybe() // Depends on the timing, don't care
-	s, err := server.NewServer(&server.Config{
-		TLSConfig:      serverTLSConfig(),
-		Conn:           udpConn,
-		Outbound:       serverOb,
-		UDPIdleTimeout: 2 * time.Second,
-		Authenticator:  auth,
-		EventLogger:    eventLogger,
-	})
-	assert.NoError(t, err)
-	defer s.Close()
-	go s.Serve()
-
-	// Create client
-	c, _, err := client.NewClient(&client.Config{
-		ServerAddr: udpAddr,
-		TLSConfig:  client.TLSConfig{InsecureSkipVerify: true},
-	})
-	assert.NoError(t, err)
-	defer c.Close()
-
-	addr := "spy.x.family:2023"
-
-	// On the client side, create a UDP session and send a packet every 1 second,
-	// 4 packets in total. The server should have one UDP session and receive all
-	// 4 packets. Then the UDP connection on the server side will receive a packet
-	// every 1 second, 4 packets in total. The client session should receive all
-	// 4 packets. Then the session will be idle for 3 seconds - should be enough
-	// to trigger the server's UDP idle timeout.
-	sobConn := mocks.NewMockUDPConn(t)
-	sobConnCh := make(chan []byte, 1)
-	sobConnChCloseFunc := sync.OnceFunc(func() { close(sobConnCh) })
-	sobConn.EXPECT().ReadFrom(mock.Anything).RunAndReturn(func(bs []byte) (int, string, error) {
-		d := <-sobConnCh
-		if d == nil {
-			return 0, "", io.EOF
-		} else {
-			return copy(bs, d), addr, nil
-		}
-	})
-	sobConn.EXPECT().WriteTo([]byte("happy"), addr).Return(5, nil).Times(4)
-	serverOb.EXPECT().UDP(addr).Return(sobConn, nil).Once()
-	eventLogger.EXPECT().UDPRequest(mock.Anything, mock.Anything, uint32(1), addr).Once()
-	cu, err := c.UDP()
-	assert.NoError(t, err)
-	// Client sends 4 packets
-	for i := 0; i < 4; i++ {
-		err = cu.Send([]byte("happy"), addr)
-		assert.NoError(t, err)
-		time.Sleep(1 * time.Second)
-	}
-	// Client receives 4 packets
-	go func() {
-		for i := 0; i < 4; i++ {
-			sobConnCh <- []byte("sad")
-			time.Sleep(1 * time.Second)
-		}
-	}()
-	for i := 0; i < 4; i++ {
-		bs, rAddr, err := cu.Receive()
-		assert.NoError(t, err)
-		assert.Equal(t, "sad", string(bs))
-		assert.Equal(t, addr, rAddr)
-	}
-	// Now we wait for 3 seconds, the server should close the UDP session.
-	sobConn.EXPECT().Close().RunAndReturn(func() error {
-		sobConnChCloseFunc()
-		return nil
-	})
-	eventLogger.EXPECT().UDPError(mock.Anything, mock.Anything, uint32(1), nil).Once()
-	time.Sleep(3 * time.Second)
-}
-
 // TestClientServerClientShutdown tests whether the server can handle the client's shutdown correctly.
 func TestClientServerClientShutdown(t *testing.T) {
 	// Create server
@@ -237,17 +154,11 @@ func TestClientServerServerShutdown(t *testing.T) {
 	})
 	assert.NoError(t, err)
 
-	// Close the server - expect the client to return ClosedError for both TCP & UDP calls.
+	// Close the server - expect the client to return ClosedError for TCP calls.
 	_ = s.Close()
 
 	_, err = c.TCP("whatever")
 	_, ok := err.(errors.ClosedError)
-	assert.True(t, ok)
-
-	time.Sleep(1 * time.Second) // Allow some time for the error to be propagated to the UDP session manager
-
-	_, err = c.UDP()
-	_, ok = err.(errors.ClosedError)
 	assert.True(t, ok)
 
 	assert.NoError(t, c.Close())

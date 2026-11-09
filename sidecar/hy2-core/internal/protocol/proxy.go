@@ -1,8 +1,6 @@
 package protocol
 
 import (
-	"bytes"
-	"encoding/binary"
 	"fmt"
 	"io"
 
@@ -18,10 +16,6 @@ const (
 
 	MaxAddressLength = 2048
 	MaxMessageLength = 2048
-	MaxPaddingLength = 4096
-
-	MaxDatagramFrameSize = 1200
-	MaxUDPSize           = 4096
 
 	maxVarInt1 = 63
 	maxVarInt2 = 16383
@@ -33,8 +27,11 @@ const (
 // 0x401 (QUIC varint)
 // Address length (QUIC varint)
 // Address (bytes)
-// Padding length (QUIC varint)
-// Padding (bytes)
+// Padding length (QUIC varint, always 0)
+//
+// There is no padding. The trailing padding length is kept for framing
+// compatibility, but the writer always emits 0 and the reader rejects any
+// non-zero value.
 
 func ReadTCPRequest(r io.Reader) (string, error) {
 	bReader := quicvarint.NewReader(r)
@@ -54,46 +51,45 @@ func ReadTCPRequest(r io.Reader) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if paddingLen > MaxPaddingLength {
+	if paddingLen != 0 {
 		return "", errors.ProtocolError{Message: "invalid padding length"}
-	}
-	if paddingLen > 0 {
-		_, err = io.CopyN(io.Discard, r, int64(paddingLen))
-		if err != nil {
-			return "", err
-		}
 	}
 	return string(addrBuf), nil
 }
 
 func WriteTCPRequest(w io.Writer, addr string) error {
-	padding := tcpRequestPadding.String()
-	paddingLen := len(padding)
 	addrLen := len(addr)
+	if addrLen == 0 || addrLen > MaxAddressLength {
+		return errors.ProtocolError{Message: "invalid address length"}
+	}
 	sz := int(quicvarint.Len(FrameTypeTCPRequest)) +
 		int(quicvarint.Len(uint64(addrLen))) + addrLen +
-		int(quicvarint.Len(uint64(paddingLen))) + paddingLen
+		int(quicvarint.Len(0))
 	buf := make([]byte, sz)
 	i := varintPut(buf, FrameTypeTCPRequest)
 	i += varintPut(buf[i:], uint64(addrLen))
 	i += copy(buf[i:], addr)
-	i += varintPut(buf[i:], uint64(paddingLen))
-	copy(buf[i:], padding)
-	_, err := w.Write(buf)
-	return err
+	varintPut(buf[i:], 0)
+	return writeFull(w, buf)
 }
 
 // TCPResponse format:
 // Status (byte, 0=ok, 1=error)
 // Message length (QUIC varint)
 // Message (bytes)
-// Padding length (QUIC varint)
-// Padding (bytes)
+// Padding length (QUIC varint, always 0)
+//
+// There is no padding. The trailing padding length is kept for framing
+// compatibility, but the writer always emits 0 and the reader rejects any
+// non-zero value.
 
 func ReadTCPResponse(r io.Reader) (bool, string, error) {
 	var status [1]byte
 	if _, err := io.ReadFull(r, status[:]); err != nil {
 		return false, "", err
+	}
+	if status[0] != 0 && status[0] != 1 {
+		return false, "", errors.ProtocolError{Message: "invalid status"}
 	}
 	bReader := quicvarint.NewReader(r)
 	msgLen, err := quicvarint.Read(bReader)
@@ -116,24 +112,19 @@ func ReadTCPResponse(r io.Reader) (bool, string, error) {
 	if err != nil {
 		return false, "", err
 	}
-	if paddingLen > MaxPaddingLength {
+	if paddingLen != 0 {
 		return false, "", errors.ProtocolError{Message: "invalid padding length"}
-	}
-	if paddingLen > 0 {
-		_, err = io.CopyN(io.Discard, r, int64(paddingLen))
-		if err != nil {
-			return false, "", err
-		}
 	}
 	return status[0] == 0, string(msgBuf), nil
 }
 
 func WriteTCPResponse(w io.Writer, ok bool, msg string) error {
-	padding := tcpResponsePadding.String()
-	paddingLen := len(padding)
 	msgLen := len(msg)
+	if msgLen > MaxMessageLength {
+		return errors.ProtocolError{Message: "invalid message length"}
+	}
 	sz := 1 + int(quicvarint.Len(uint64(msgLen))) + msgLen +
-		int(quicvarint.Len(uint64(paddingLen))) + paddingLen
+		int(quicvarint.Len(0))
 	buf := make([]byte, sz)
 	if ok {
 		buf[0] = 0
@@ -142,84 +133,21 @@ func WriteTCPResponse(w io.Writer, ok bool, msg string) error {
 	}
 	i := varintPut(buf[1:], uint64(msgLen))
 	i += copy(buf[1+i:], msg)
-	i += varintPut(buf[1+i:], uint64(paddingLen))
-	copy(buf[1+i:], padding)
-	_, err := w.Write(buf)
-	return err
+	varintPut(buf[1+i:], 0)
+	return writeFull(w, buf)
 }
 
-// UDPMessage format:
-// Session ID (uint32 BE)
-// Packet ID (uint16 BE)
-// Fragment ID (uint8)
-// Fragment count (uint8)
-// Address length (QUIC varint)
-// Address (bytes)
-// Data...
-
-type UDPMessage struct {
-	SessionID uint32 // 4
-	PacketID  uint16 // 2
-	FragID    uint8  // 1
-	FragCount uint8  // 1
-	Addr      string // varint + bytes
-	Data      []byte
-}
-
-func (m *UDPMessage) HeaderSize() int {
-	lAddr := len(m.Addr)
-	return 4 + 2 + 1 + 1 + int(quicvarint.Len(uint64(lAddr))) + lAddr
-}
-
-func (m *UDPMessage) Size() int {
-	return m.HeaderSize() + len(m.Data)
-}
-
-func (m *UDPMessage) Serialize(buf []byte) int {
-	// Make sure the buffer is big enough
-	if len(buf) < m.Size() {
-		return -1
-	}
-	binary.BigEndian.PutUint32(buf, m.SessionID)
-	binary.BigEndian.PutUint16(buf[4:], m.PacketID)
-	buf[6] = m.FragID
-	buf[7] = m.FragCount
-	i := varintPut(buf[8:], uint64(len(m.Addr)))
-	i += copy(buf[8+i:], m.Addr)
-	i += copy(buf[8+i:], m.Data)
-	return 8 + i
-}
-
-func ParseUDPMessage(msg []byte) (*UDPMessage, error) {
-	m := &UDPMessage{}
-	buf := bytes.NewBuffer(msg)
-	if err := binary.Read(buf, binary.BigEndian, &m.SessionID); err != nil {
-		return nil, err
-	}
-	if err := binary.Read(buf, binary.BigEndian, &m.PacketID); err != nil {
-		return nil, err
-	}
-	if err := binary.Read(buf, binary.BigEndian, &m.FragID); err != nil {
-		return nil, err
-	}
-	if err := binary.Read(buf, binary.BigEndian, &m.FragCount); err != nil {
-		return nil, err
-	}
-	lAddr, err := quicvarint.Read(buf)
+// writeFull writes the whole buffer and reports io.ErrShortWrite if the
+// underlying writer accepted only part of it.
+func writeFull(w io.Writer, buf []byte) error {
+	n, err := w.Write(buf)
 	if err != nil {
-		return nil, err
+		return err
 	}
-	if lAddr == 0 || lAddr > MaxMessageLength {
-		return nil, errors.ProtocolError{Message: "invalid address length"}
+	if n != len(buf) {
+		return io.ErrShortWrite
 	}
-	bs := buf.Bytes()
-	if len(bs) <= int(lAddr) {
-		// We use <= instead of < here as we expect at least one byte of data after the address
-		return nil, errors.ProtocolError{Message: "invalid message length"}
-	}
-	m.Addr = string(bs[:lAddr])
-	m.Data = bs[lAddr:]
-	return m, nil
+	return nil
 }
 
 // varintPut is like quicvarint.Append, but instead of appending to a slice,

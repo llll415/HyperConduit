@@ -12,9 +12,6 @@ packages:
       Outbound:
         config:
           mockname: MockOutbound
-      UDPConn:
-        config:
-          mockname: MockUDPConn
       Authenticator:
         config:
           mockname: MockAuthenticator
@@ -24,6 +21,3 @@ packages:
       TrafficLogger:
         config:
           mockname: MockTrafficLogger
-      RequestHook:
-        config:
-          mockname: MockRequestHook

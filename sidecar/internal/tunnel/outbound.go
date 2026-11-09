@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/apernet/hysteria/core/v2/observe"
-	"github.com/apernet/hysteria/core/v2/server"
 )
 
 // The protocol still carries an address, but it is only a service identifier.
@@ -189,6 +188,3 @@ func (c *boundConn) Close() error {
 	c.once.Do(c.closed)
 	return err
 }
-
-func (*fixedOutbound) UDP(string) (server.UDPConn, error) { return nil, errTargetDenied }
-func (*fixedOutbound) CheckUDP(string) error              { return errTargetDenied }

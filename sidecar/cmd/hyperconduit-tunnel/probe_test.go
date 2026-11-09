@@ -26,7 +26,6 @@ const probeWorkerTestTimeout = 10 * time.Second
 type cmdProbeBackend struct {
 	mu  sync.Mutex
 	tcp int
-	udp int
 }
 
 func (b *cmdProbeBackend) TCP(string) (net.Conn, error) {
@@ -36,19 +35,10 @@ func (b *cmdProbeBackend) TCP(string) (net.Conn, error) {
 	return nil, errors.New("probe test must not dial TCP")
 }
 
-func (b *cmdProbeBackend) UDP(string) (server.UDPConn, error) {
-	b.mu.Lock()
-	b.udp++
-	b.mu.Unlock()
-	return nil, errors.New("probe test must not dial UDP")
-}
-
-func (b *cmdProbeBackend) CheckUDP(string) error { return nil }
-
-func (b *cmdProbeBackend) counts() (tcp, udp int) {
+func (b *cmdProbeBackend) count() int {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	return b.tcp, b.udp
+	return b.tcp
 }
 
 type cmdProbeAuth struct {
@@ -87,7 +77,6 @@ func startCmdProbeServer(t *testing.T, response []byte) (string, *cmdProbeBacken
 		Conn:               pc,
 		Outbound:           backend,
 		Authenticator:      auth,
-		DisableUDP:         true,
 		CapabilityResponse: response,
 	})
 	if err != nil {
@@ -179,8 +168,8 @@ func TestProbeWorkerRealCapabilityServer(t *testing.T) {
 			if auth.count() != 0 {
 				t.Fatalf("probe authenticated: %d calls", auth.count())
 			}
-			if tcp, udp := backend.counts(); tcp != 0 || udp != 0 {
-				t.Fatalf("probe dialed backend: tcp=%d udp=%d", tcp, udp)
+			if tcp := backend.count(); tcp != 0 {
+				t.Fatalf("probe dialed backend: tcp=%d", tcp)
 			}
 			_ = pw.Close()
 			if err := waitCmdProbeRun(t, done); err != nil {

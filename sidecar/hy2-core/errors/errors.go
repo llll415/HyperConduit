@@ -43,7 +43,7 @@ func (a AuthError) Error() string {
 }
 
 // DialError is returned when the server rejects the client's dial request.
-// This applies to both TCP and UDP.
+// This applies to TCP proxy streams.
 type DialError struct {
 	Message string
 }

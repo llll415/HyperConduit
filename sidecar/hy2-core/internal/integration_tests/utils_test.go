@@ -36,8 +36,7 @@ func serverConn() (net.PacketConn, net.Addr, error) {
 }
 
 // testOutbound is the outbound used by integration tests that only care about
-// the server-side behavior. It forwards to the real target and keeps the
-// full-cone UDP semantics the server used to provide by default.
+// the server-side behavior. It forwards TCP to the real target.
 type testOutbound struct{}
 
 var testOutboundDialer = net.Dialer{
@@ -46,39 +45,6 @@ var testOutboundDialer = net.Dialer{
 
 func (o testOutbound) TCP(reqAddr string) (net.Conn, error) {
 	return testOutboundDialer.Dial("tcp", reqAddr)
-}
-
-func (o testOutbound) UDP(reqAddr string) (server.UDPConn, error) {
-	conn, err := net.ListenUDP("udp", nil)
-	if err != nil {
-		return nil, err
-	}
-	return &testUDPConn{conn}, nil
-}
-
-func (o testOutbound) CheckUDP(reqAddr string) error {
-	return nil
-}
-
-// testUDPConn is the full-cone UDP connection wrapper used by testOutbound.
-type testUDPConn struct {
-	*net.UDPConn
-}
-
-func (c *testUDPConn) ReadFrom(b []byte) (int, string, error) {
-	n, addr, err := c.UDPConn.ReadFrom(b)
-	if addr != nil {
-		return n, addr.String(), err
-	}
-	return n, "", err
-}
-
-func (c *testUDPConn) WriteTo(b []byte, addr string) (int, error) {
-	uAddr, err := net.ResolveUDPAddr("udp", addr)
-	if err != nil {
-		return 0, err
-	}
-	return c.UDPConn.WriteTo(b, uAddr)
 }
 
 // tcpEchoServer is a TCP server that echoes what it reads from the connection.
@@ -102,28 +68,4 @@ func (s *tcpEchoServer) Serve() error {
 
 func (s *tcpEchoServer) Close() error {
 	return s.Listener.Close()
-}
-
-// udpEchoServer is a UDP server that echoes what it reads from the connection.
-// It will never actively close the connection.
-type udpEchoServer struct {
-	Conn net.PacketConn
-}
-
-func (s *udpEchoServer) Serve() error {
-	buf := make([]byte, 65536)
-	for {
-		n, addr, err := s.Conn.ReadFrom(buf)
-		if err != nil {
-			return err
-		}
-		_, err = s.Conn.WriteTo(buf[:n], addr)
-		if err != nil {
-			return err
-		}
-	}
-}
-
-func (s *udpEchoServer) Close() error {
-	return s.Conn.Close()
 }

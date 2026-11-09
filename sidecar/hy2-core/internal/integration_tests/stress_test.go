@@ -3,7 +3,6 @@ package integration_tests
 import (
 	"bytes"
 	"context"
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -11,7 +10,6 @@ import (
 	"net"
 	"os"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -19,7 +17,6 @@ import (
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/goleak"
-	"golang.org/x/time/rate"
 
 	"github.com/apernet/hysteria/core/v2/client"
 	"github.com/apernet/hysteria/core/v2/internal/integration_tests/mocks"
@@ -28,8 +25,7 @@ import (
 
 const stressBufferSize = 32 * 1024
 
-// Every case owns its transport: canceling it must interrupt TCP setup and
-// QUIC DATAGRAM sends, which have no per-operation context/deadline API.
+// Every case owns its transport: cancellation interrupts TCP setup and I/O.
 func newStressClient(t *testing.T, timeout time.Duration) (client.Client, context.Context, context.CancelCauseFunc) {
 	t.Helper()
 	leakCheck := goleak.IgnoreCurrent()
@@ -193,121 +189,6 @@ func stressTCPTransfer(ctx context.Context, conn net.Conn, size, seed int64) err
 	return errors.Join(readErr, writeErr)
 }
 
-type stressUDPPacket struct {
-	data []byte
-	addr string
-	err  error
-}
-
-type stressUDPStats struct{ sent, received, duplicates int }
-
-// Payload identity catches corruption, duplicate counting, and cross-session
-// delivery. The packet number permits loss and reordering without retries.
-func stressUDPPayload(size, session, sequence int) []byte {
-	data := make([]byte, size)
-	_, _ = rand.New(rand.NewSource(int64(session))).Read(data)
-	binary.BigEndian.PutUint64(data, uint64(sequence))
-	return data
-}
-
-func stressUDPTransfer(ctx context.Context, abort context.CancelCauseFunc, conn client.HyUDPConn, addr string, size, count, session int, drain time.Duration, pace func(context.Context) error) (stats stressUDPStats, result error) {
-	localCtx, cancel := context.WithCancel(ctx)
-	received := make(chan stressUDPPacket, 1)
-	sent := make(chan error, 1)
-	var sendCount atomic.Int64
-	var wg sync.WaitGroup
-	wg.Go(func() {
-		for {
-			data, addr, err := conn.Receive()
-			select {
-			case received <- stressUDPPacket{data, addr, err}:
-			case <-localCtx.Done():
-				return
-			}
-			if err != nil {
-				return
-			}
-		}
-	})
-	wg.Go(func() {
-		for sequence := 0; sequence < count; sequence++ {
-			if err := pace(localCtx); err != nil {
-				sent <- err
-				return
-			}
-			if err := conn.Send(stressUDPPayload(size, session, sequence), addr); err != nil {
-				sent <- fmt.Errorf("send packet %d: %w", sequence, err)
-				return
-			}
-			sendCount.Add(1)
-		}
-		sent <- nil
-	})
-	defer func() {
-		// A failed worker cancels the fixture, closing the QUIC transport to
-		// unblock a Send stuck in its queue. Closing a UDP session only wakes Receive.
-		if result != nil {
-			abort(result)
-		}
-		cancel()
-		_ = conn.Close()
-		wg.Wait()
-		stats.sent = int(sendCount.Load())
-	}()
-	seen := make([]bool, count)
-	var drained <-chan time.Time
-	timer := time.NewTimer(time.Hour)
-	timer.Stop()
-	defer timer.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return stats, fmt.Errorf("sent/received %d/%d of %d: %w", sendCount.Load(), stats.received, count, context.Cause(ctx))
-		case err := <-sent:
-			if err != nil {
-				return stats, err
-			}
-			stats.sent = count
-			sent = nil
-			timer.Reset(drain)
-			drained = timer.C
-		case packet := <-received:
-			if packet.err != nil {
-				return stats, fmt.Errorf("receive: %w", packet.err)
-			}
-			if packet.addr != addr {
-				return stats, fmt.Errorf("source address %q, want %q", packet.addr, addr)
-			}
-			if len(packet.data) != size {
-				return stats, fmt.Errorf("payload size %d, want %d", len(packet.data), size)
-			}
-			sequence := binary.BigEndian.Uint64(packet.data)
-			if sequence >= uint64(count) {
-				return stats, fmt.Errorf("invalid packet number %d", sequence)
-			}
-			if !bytes.Equal(packet.data, stressUDPPayload(size, session, int(sequence))) {
-				return stats, fmt.Errorf("payload mismatch in packet %d", sequence)
-			}
-			if seen[sequence] {
-				stats.duplicates++
-			} else {
-				seen[sequence] = true
-				stats.received++
-			}
-		case <-drained:
-			// Ceiling matters for small counts: always require at least one reply.
-			minimum := (count*8 + 9) / 10
-			if stats.received < minimum {
-				return stats, fmt.Errorf("UDP loss: received %d/%d unique packets (minimum %d, duplicates %d)", stats.received, count, minimum, stats.duplicates)
-			}
-			return stats, nil
-		}
-		if stats.sent == count && stats.received == count {
-			return stats, nil
-		}
-	}
-}
-
 func stressTCPEcho(t *testing.T) string {
 	t.Helper()
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
@@ -346,20 +227,6 @@ func stressTCPEcho(t *testing.T) string {
 		wg.Wait()
 	})
 	return listener.Addr().String()
-}
-
-func stressUDPEcho(t *testing.T) string {
-	t.Helper()
-	conn, err := net.ListenPacket("udp6", "[::1]:0")
-	if err != nil {
-		conn, err = net.ListenPacket("udp4", "127.0.0.1:0")
-	}
-	require.NoError(t, err)
-	s := &udpEchoServer{Conn: conn}
-	done := make(chan error, 1)
-	go func() { done <- s.Serve() }()
-	t.Cleanup(func() { _ = s.Close(); <-done })
-	return conn.LocalAddr().String()
 }
 
 func TestClientServerTCPStress(t *testing.T) {
@@ -403,67 +270,6 @@ func TestClientServerTCPStress(t *testing.T) {
 			})
 			require.NoError(t, err)
 			t.Logf("verified %d streams, %d bytes each, parallel=%d in %s", tc.iterations*tc.parallel, tc.size, tc.parallel, time.Since(started))
-		})
-	}
-}
-
-func TestClientServerUDPStress(t *testing.T) {
-	cases := []struct {
-		name                              string
-		size, count, parallel, iterations int
-	}{
-		{"small", 100, 200, 1, 1},
-		{"fragmented", 3000, 200, 1, 1},
-		{"small_session_churn", 100, 100, 8, 3},
-		{"fragmented_session_churn", 3000, 100, 8, 3},
-	}
-	timeout := 30 * time.Second
-	if os.Getenv("HYSTERIA_STRESS_EXTENDED") == "1" && !testing.Short() {
-		cases = append(cases, []struct {
-			name                              string
-			size, count, parallel, iterations int
-		}{
-			{"extended_small", 100, 1000, 1, 1},
-			{"extended_fragmented", 3000, 1000, 1, 1},
-			{"extended_small_sequential", 100, 1000, 1, 5},
-			{"extended_fragmented_sequential", 3000, 200, 1, 5},
-			{"extended_small_parallel", 100, 1000, 5, 2},
-			{"extended_fragmented_parallel", 3000, 200, 5, 2},
-		}...)
-		timeout = 2 * time.Minute
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			c, ctx, cancel := newStressClient(t, timeout)
-			addr := stressUDPEcho(t)
-			// A byte limit alone permits enormous bursts of small packets. Bound
-			// both packet rate and byte rate globally, with only one packet of burst.
-			packets := rate.NewLimiter(1000, 1)
-			bandwidth := rate.NewLimiter(1<<20, tc.size)
-			pace := func(ctx context.Context) error {
-				if err := packets.Wait(ctx); err != nil {
-					return err
-				}
-				return bandwidth.WaitN(ctx, tc.size)
-			}
-			var mu sync.Mutex
-			var total stressUDPStats
-			err := runStressWorkers(ctx, cancel, tc.iterations, tc.parallel, func(ctx context.Context, id int) error {
-				conn, err := c.UDP()
-				if err != nil {
-					return err
-				}
-				abort := func(err error) { cancel(fmt.Errorf("session %d: %w", id, err)) }
-				stats, err := stressUDPTransfer(ctx, abort, conn, addr, tc.size, tc.count, id, time.Second, pace)
-				mu.Lock()
-				total.sent += stats.sent
-				total.received += stats.received
-				total.duplicates += stats.duplicates
-				mu.Unlock()
-				return err
-			})
-			t.Logf("sent=%d unique replies=%d duplicates=%d", total.sent, total.received, total.duplicates)
-			require.NoError(t, err)
 		})
 	}
 }

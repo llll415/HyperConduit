@@ -139,7 +139,6 @@ func startContextOutboundClient(t *testing.T, serverAddr net.Addr) client.Contex
 		ServerAddr: serverAddr,
 		Auth:       "test",
 		TLSConfig:  client.TLSConfig{InsecureSkipVerify: true},
-		QUICConfig: client.QUICConfig{DisableChromeParrot: true},
 	})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = c.Close() })

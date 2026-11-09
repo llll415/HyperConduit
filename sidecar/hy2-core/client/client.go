@@ -31,9 +31,10 @@ const (
 	streamErrCodeCancel quic.StreamErrorCode = 0
 )
 
+// Client is a Hysteria client. It only carries TCP proxy streams; the product
+// does not expose UDP sessions.
 type Client interface {
 	TCP(addr string) (net.Conn, error)
-	UDP() (HyUDPConn, error)
 	Close() error
 }
 
@@ -51,13 +52,9 @@ type ContextClient interface {
 	Observation() *observe.Connection
 }
 
-type HyUDPConn interface {
-	Receive() ([]byte, string, error)
-	Send([]byte, string) error
-	Close() error
-}
-
 type HandshakeInfo struct {
+	// UDPEnabled is always false in this TCP-only core. The authentication
+	// header remains part of the retained HY2 negotiation format.
 	UDPEnabled  bool
 	Tx          uint64             // Local Brutal target; 0 when using BBR or Reno.
 	Congestion  observe.Congestion // Local sending controller, not the remote controller.
@@ -102,8 +99,6 @@ type clientImpl struct {
 	tr          *quic.Transport
 	conn        *quic.Conn
 	observation *observe.Connection
-
-	udpSM *udpSessionManager
 }
 
 var _ ContextClient = (*clientImpl)(nil)
@@ -131,19 +126,12 @@ func (c *clientImpl) connect(ctx context.Context) (*HandshakeInfo, error) {
 		MaxIdleTimeout:                 c.config.QUICConfig.MaxIdleTimeout,
 		KeepAlivePeriod:                c.config.QUICConfig.KeepAlivePeriod,
 		DisablePathMTUDiscovery:        c.config.QUICConfig.DisablePathMTUDiscovery,
-		EnableDatagrams:                true,
-		MaxDatagramFrameSize:           protocol.MaxDatagramFrameSize,
-		OmitMaxDatagramFrameSize:       true,
-		DisablePathManager:             true,
-		ChromeParrot:                   !c.config.QUICConfig.DisableChromeParrot,
+		// The client does not use QUIC datagrams, so no datagram support is
+		// advertised during the handshake.
+		EnableDatagrams:    false,
+		DisablePathManager: true,
 	}
 	tr := &quic.Transport{Conn: pktConn, DisableGSO: c.config.QUICConfig.DisableGSO}
-	if !c.config.QUICConfig.DisableChromeParrot {
-		// Chrome uses a zero-length source connection ID. This has to be set on the
-		// Transport, since it fixes the length at which incoming packets' connection
-		// IDs are parsed; leaving it default yields 4-byte IDs, visible on the wire.
-		tr.ConnectionIDGenerator = quic.ZeroLengthConnectionIDGenerator{}
-	}
 	// Prepare RoundTripper
 	// The dial goroutine may still be running when RoundTrip returns early due
 	// to ctx cancellation, so access to conn must be synchronized.
@@ -255,11 +243,9 @@ func (c *clientImpl) connect(ctx context.Context) (*HandshakeInfo, error) {
 		cc = observe.Congestion{Type: "brutal", TxBytesPerSecond: actualTx}
 	}
 	c.observation = observe.New(qc, "client", cc)
-	if authResp.UDPEnabled {
-		c.udpSM = newUDPSessionManager(&udpIOImpl{Conn: qc})
-	}
+	// No application UDP API or QUIC datagram capability is exposed.
 	return &HandshakeInfo{
-		UDPEnabled:  authResp.UDPEnabled,
+		UDPEnabled:  false,
 		Tx:          actualTx,
 		Congestion:  cc,
 		ServerAddr:  c.config.ServerAddr,
@@ -394,13 +380,6 @@ func (c *clientImpl) TCPContext(ctx context.Context, addr string) (net.Conn, err
 	}, nil
 }
 
-func (c *clientImpl) UDP() (HyUDPConn, error) {
-	if c.udpSM == nil {
-		return nil, coreErrs.DialError{Message: "UDP not enabled"}
-	}
-	return c.udpSM.NewUDP()
-}
-
 func (c *clientImpl) Close() error {
 	_ = c.conn.CloseWithError(closeErrCodeOK, "")
 	_ = c.tr.Close()
@@ -506,33 +485,4 @@ func (c *tcpConn) SetReadDeadline(t time.Time) error {
 
 func (c *tcpConn) SetWriteDeadline(t time.Time) error {
 	return c.Orig.SetWriteDeadline(t)
-}
-
-type udpIOImpl struct {
-	Conn *quic.Conn
-}
-
-func (io *udpIOImpl) ReceiveMessage() (*protocol.UDPMessage, error) {
-	for {
-		msg, err := io.Conn.ReceiveDatagram(context.Background())
-		if err != nil {
-			// Connection error, this will stop the session manager
-			return nil, err
-		}
-		udpMsg, err := protocol.ParseUDPMessage(msg)
-		if err != nil {
-			// Invalid message, this is fine - just wait for the next
-			continue
-		}
-		return udpMsg, nil
-	}
-}
-
-func (io *udpIOImpl) SendMessage(buf []byte, msg *protocol.UDPMessage) error {
-	msgN := msg.Serialize(buf)
-	if msgN < 0 {
-		// Message larger than buffer, silent drop
-		return nil
-	}
-	return io.Conn.SendDatagram(buf[:msgN])
 }

@@ -58,9 +58,10 @@ func TestClientServerBadAuth(t *testing.T) {
 	assert.True(t, ok)
 }
 
-// TestClientServerUDPDisabled tests how the client handles a server that does not support UDP.
-// UDP should return a DialError.
-func TestClientServerUDPDisabled(t *testing.T) {
+// TestClientServerUDPAlwaysDisabled verifies that the client never offers UDP
+// and the handshake always advertises UDP as disabled. The UDP proxy API no
+// longer exists, so this only inspects the handshake declaration.
+func TestClientServerUDPAlwaysDisabled(t *testing.T) {
 	// Create server
 	udpConn, udpAddr, err := serverConn()
 	assert.NoError(t, err)
@@ -69,7 +70,6 @@ func TestClientServerUDPDisabled(t *testing.T) {
 	s, err := server.NewServer(&server.Config{
 		TLSConfig:     serverTLSConfig(),
 		Conn:          udpConn,
-		DisableUDP:    true,
 		Outbound:      testOutbound{},
 		Authenticator: auth,
 	})
@@ -78,17 +78,14 @@ func TestClientServerUDPDisabled(t *testing.T) {
 	go s.Serve()
 
 	// Create client
-	c, _, err := client.NewClient(&client.Config{
+	c, info, err := client.NewClient(&client.Config{
 		ServerAddr: udpAddr,
 		TLSConfig:  client.TLSConfig{InsecureSkipVerify: true},
 	})
 	assert.NoError(t, err)
 	defer c.Close()
 
-	conn, err := c.UDP()
-	assert.Nil(t, conn)
-	_, ok := err.(coreErrs.DialError)
-	assert.True(t, ok)
+	assert.False(t, info.UDPEnabled, "handshake must always report UDP as disabled")
 }
 
 // TestClientServerTCPEcho tests TCP forwarding using a TCP echo server.
@@ -139,57 +136,9 @@ func TestClientServerTCPEcho(t *testing.T) {
 	assert.Equal(t, sData, rData)
 }
 
-// TestClientServerUDPEcho tests UDP forwarding using a UDP echo server.
-func TestClientServerUDPEcho(t *testing.T) {
-	// Create server
-	udpConn, udpAddr, err := serverConn()
-	assert.NoError(t, err)
-	auth := mocks.NewMockAuthenticator(t)
-	auth.EXPECT().Authenticate(mock.Anything, mock.Anything, mock.Anything).Return(true, "nobody")
-	s, err := server.NewServer(&server.Config{
-		TLSConfig:     serverTLSConfig(),
-		Conn:          udpConn,
-		Outbound:      testOutbound{},
-		Authenticator: auth,
-	})
-	assert.NoError(t, err)
-	defer s.Close()
-	go s.Serve()
-
-	// Create UDP echo server
-	echoAddr := "127.0.0.1:22333"
-	echoConn, err := net.ListenPacket("udp", echoAddr)
-	assert.NoError(t, err)
-	echoServer := &udpEchoServer{Conn: echoConn}
-	defer echoServer.Close()
-	go echoServer.Serve()
-
-	// Create client
-	c, _, err := client.NewClient(&client.Config{
-		ServerAddr: udpAddr,
-		TLSConfig:  client.TLSConfig{InsecureSkipVerify: true},
-	})
-	assert.NoError(t, err)
-	defer c.Close()
-
-	// Listen UDP
-	conn, err := c.UDP()
-	assert.NoError(t, err)
-	defer conn.Close()
-
-	// Send and receive data
-	sData := []byte("hello world")
-	err = conn.Send(sData, echoAddr)
-	assert.NoError(t, err)
-	rData, rAddr, err := conn.Receive()
-	assert.NoError(t, err)
-	assert.Equal(t, sData, rData)
-	assert.Equal(t, echoAddr, rAddr)
-}
-
 // TestClientServerHandshakeInfo tests that the client returns the correct handshake info.
 func TestClientServerHandshakeInfo(t *testing.T) {
-	// Create server 1, UDP enabled, unlimited bandwidth
+	// Create server 1, unlimited bandwidth
 	udpConn, udpAddr, err := serverConn()
 	assert.NoError(t, err)
 	auth := mocks.NewMockAuthenticator(t)
@@ -213,7 +162,7 @@ func TestClientServerHandshakeInfo(t *testing.T) {
 	})
 	assert.NoError(t, err)
 	assert.Equal(t, &client.HandshakeInfo{
-		UDPEnabled: true,
+		UDPEnabled: false,
 		Tx:         123456,
 		Congestion: observe.Congestion{Type: "brutal", TxBytesPerSecond: 123456},
 		ServerAddr: udpAddr,
@@ -223,7 +172,7 @@ func TestClientServerHandshakeInfo(t *testing.T) {
 	_ = s.Close()
 	_ = c.Close()
 
-	// Create server 2, UDP disabled, limited rx bandwidth
+	// Create server 2, limited rx bandwidth
 	udpConn, udpAddr, err = serverConn()
 	assert.NoError(t, err)
 	s, err = server.NewServer(&server.Config{
@@ -233,7 +182,6 @@ func TestClientServerHandshakeInfo(t *testing.T) {
 		BandwidthConfig: server.BandwidthConfig{
 			MaxRx: 100000,
 		},
-		DisableUDP:    true,
 		Authenticator: auth,
 	})
 	assert.NoError(t, err)
@@ -259,7 +207,7 @@ func TestClientServerHandshakeInfo(t *testing.T) {
 	_ = s.Close()
 	_ = c.Close()
 
-	// Create server 3, UDP enabled, ignore client bandwidth
+	// Create server 3, ignore client bandwidth
 	udpConn, udpAddr, err = serverConn()
 	assert.NoError(t, err)
 	s, err = server.NewServer(&server.Config{
@@ -282,7 +230,7 @@ func TestClientServerHandshakeInfo(t *testing.T) {
 	})
 	assert.NoError(t, err)
 	assert.Equal(t, &client.HandshakeInfo{
-		UDPEnabled: true,
+		UDPEnabled: false,
 		Tx:         0,
 		Congestion: observe.Congestion{Type: "bbr"},
 		ServerAddr: udpAddr,

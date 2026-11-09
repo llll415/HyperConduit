@@ -24,7 +24,6 @@ const capabilityTestTimeout = 10 * time.Second
 type capabilityBackend struct {
 	mu  sync.Mutex
 	tcp int
-	udp int
 }
 
 func (b *capabilityBackend) TCP(string) (net.Conn, error) {
@@ -34,19 +33,10 @@ func (b *capabilityBackend) TCP(string) (net.Conn, error) {
 	return nil, context.DeadlineExceeded
 }
 
-func (b *capabilityBackend) UDP(string) (UDPConn, error) {
-	b.mu.Lock()
-	b.udp++
-	b.mu.Unlock()
-	return nil, context.DeadlineExceeded
-}
-
-func (b *capabilityBackend) CheckUDP(string) error { return nil }
-
-func (b *capabilityBackend) counts() (tcp, udp int) {
+func (b *capabilityBackend) count() int {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	return b.tcp, b.udp
+	return b.tcp
 }
 
 type capabilityAuth struct {
@@ -84,7 +74,6 @@ func startCapabilityServer(t *testing.T, response []byte, auth *capabilityAuth) 
 		Conn:               pc,
 		Outbound:           backend,
 		Authenticator:      auth,
-		DisableUDP:         true,
 		CapabilityResponse: response,
 	})
 	if err != nil {
@@ -148,8 +137,8 @@ func TestCapabilityExactRequestReturnsFixedJSON(t *testing.T) {
 	got, err := io.ReadAll(resp.Body)
 	require.NoError(t, err)
 	assert.Equal(t, body, got)
-	if tcp, udp := backend.counts(); tcp != 0 || udp != 0 {
-		t.Fatalf("capability request dialed backend: tcp=%d udp=%d", tcp, udp)
+	if tcp := backend.count(); tcp != 0 {
+		t.Fatalf("capability request dialed backend: tcp=%d", tcp)
 	}
 }
 
@@ -171,8 +160,8 @@ func TestCapabilityDoesNotAuthenticate(t *testing.T) {
 	authResp := c.do(t, http.MethodPost, protocol.URLHost, protocol.URLPath, authHeader)
 	require.Equal(t, protocol.StatusAuthOK, authResp.StatusCode)
 	assert.Equal(t, 1, auth.count())
-	if tcp, udp := backend.counts(); tcp != 0 || udp != 0 {
-		t.Fatalf("capability/auth requests dialed backend: tcp=%d udp=%d", tcp, udp)
+	if tcp := backend.count(); tcp != 0 {
+		t.Fatalf("capability/auth requests dialed backend: tcp=%d", tcp)
 	}
 }
 

@@ -3,6 +3,7 @@ package integration_tests
 import (
 	"context"
 	"crypto/tls"
+	"io"
 	"net"
 	"net/http"
 	"net/url"
@@ -12,6 +13,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 
+	"github.com/apernet/hysteria/core/v2/client"
 	"github.com/apernet/hysteria/core/v2/internal/integration_tests/mocks"
 	"github.com/apernet/hysteria/core/v2/internal/protocol"
 	"github.com/apernet/hysteria/core/v2/server"
@@ -20,11 +22,54 @@ import (
 	"github.com/apernet/quic-go/http3"
 )
 
-// TestServerMasquerade is a test to ensure that the server behaves as a normal
-// HTTP/3 server when dealing with an unauthenticated client. This is mainly to
-// confirm that the server does not expose itself to active probing.
-func TestServerMasquerade(t *testing.T) {
-	// Create server
+// TestClientServerTCPBasic keeps the meaningful TCP regression from the old
+// hook test: a plain TCP request still reaches the outbound and echoes data
+// without any request hook or sniffing stage.
+func TestClientServerTCPBasic(t *testing.T) {
+	udpConn, udpAddr, err := serverConn()
+	assert.NoError(t, err)
+	auth := mocks.NewMockAuthenticator(t)
+	auth.EXPECT().Authenticate(mock.Anything, mock.Anything, mock.Anything).Return(true, "nobody")
+	s, err := server.NewServer(&server.Config{
+		TLSConfig:     serverTLSConfig(),
+		Conn:          udpConn,
+		Outbound:      testOutbound{},
+		Authenticator: auth,
+	})
+	assert.NoError(t, err)
+	defer s.Close()
+	go s.Serve()
+
+	echoListener, err := net.Listen("tcp", "127.0.0.1:0")
+	assert.NoError(t, err)
+	echoServer := &tcpEchoServer{Listener: echoListener}
+	defer echoServer.Close()
+	go echoServer.Serve()
+
+	c, _, err := client.NewClient(&client.Config{
+		ServerAddr: udpAddr,
+		TLSConfig:  client.TLSConfig{InsecureSkipVerify: true},
+	})
+	assert.NoError(t, err)
+	defer c.Close()
+
+	conn, err := c.TCP(echoListener.Addr().String())
+	assert.NoError(t, err)
+	defer conn.Close()
+
+	sData := []byte("hello world")
+	_, err = conn.Write(sData)
+	assert.NoError(t, err)
+	rData := make([]byte, len(sData))
+	_, err = io.ReadFull(conn, rData)
+	assert.NoError(t, err)
+	assert.Equal(t, sData, rData)
+}
+
+// TestServerRejectsUnauthenticatedRequests keeps the meaningful gate
+// regression from the old masquerade test: unauthenticated HTTP gets the
+// fixed 404 page and an unauthenticated proxy stream receives nothing.
+func TestServerRejectsUnauthenticatedRequests(t *testing.T) {
 	udpConn, udpAddr, err := serverConn()
 	assert.NoError(t, err)
 	auth := mocks.NewMockAuthenticator(t)
@@ -39,7 +84,6 @@ func TestServerMasquerade(t *testing.T) {
 	defer s.Close()
 	go s.Serve()
 
-	// QUIC connection & RoundTripper
 	var conn *quic.Conn
 	rt := &http3.Transport{
 		TLSClientConfig: &tls.Config{
@@ -54,10 +98,8 @@ func TestServerMasquerade(t *testing.T) {
 			return qc, nil
 		},
 	}
-	defer rt.Close() // This will close the QUIC connection
+	defer rt.Close()
 
-	// Send the bogus request
-	// We expect 404 (from the default handler)
 	req := &http.Request{
 		Method: http.MethodPost,
 		URL: &url.URL{
@@ -71,20 +113,16 @@ func TestServerMasquerade(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Equal(t, http.StatusNotFound, resp.StatusCode)
 	for k := range resp.Header {
-		// Make sure no strange headers are sent by the server
 		assert.NotContains(t, k, "Hysteria")
 	}
 
 	buf := make([]byte, 1024)
-
-	// We send a TCP request anyway, see if we get a response
 	tcpStream, err := conn.OpenStream()
 	assert.NoError(t, err)
 	defer tcpStream.Close()
 	err = protocol.WriteTCPRequest(tcpStream, "www.google.com:443")
 	assert.NoError(t, err)
 
-	// We should receive nothing
 	_ = tcpStream.SetReadDeadline(time.Now().Add(2 * time.Second))
 	n, err := tcpStream.Read(buf)
 	assert.Equal(t, 0, n)

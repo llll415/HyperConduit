@@ -5,7 +5,6 @@ package mocks
 import (
 	net "net"
 
-	server "github.com/apernet/hysteria/core/v2/server"
 	mock "github.com/stretchr/testify/mock"
 )
 
@@ -20,52 +19,6 @@ type MockOutbound_Expecter struct {
 
 func (_m *MockOutbound) EXPECT() *MockOutbound_Expecter {
 	return &MockOutbound_Expecter{mock: &_m.Mock}
-}
-
-// CheckUDP provides a mock function with given fields: reqAddr
-func (_m *MockOutbound) CheckUDP(reqAddr string) error {
-	ret := _m.Called(reqAddr)
-
-	if len(ret) == 0 {
-		panic("no return value specified for CheckUDP")
-	}
-
-	var r0 error
-	if rf, ok := ret.Get(0).(func(string) error); ok {
-		r0 = rf(reqAddr)
-	} else {
-		r0 = ret.Error(0)
-	}
-
-	return r0
-}
-
-// MockOutbound_CheckUDP_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'CheckUDP'
-type MockOutbound_CheckUDP_Call struct {
-	*mock.Call
-}
-
-// CheckUDP is a helper method to define mock.On call
-//   - reqAddr string
-func (_e *MockOutbound_Expecter) CheckUDP(reqAddr interface{}) *MockOutbound_CheckUDP_Call {
-	return &MockOutbound_CheckUDP_Call{Call: _e.mock.On("CheckUDP", reqAddr)}
-}
-
-func (_c *MockOutbound_CheckUDP_Call) Run(run func(reqAddr string)) *MockOutbound_CheckUDP_Call {
-	_c.Call.Run(func(args mock.Arguments) {
-		run(args[0].(string))
-	})
-	return _c
-}
-
-func (_c *MockOutbound_CheckUDP_Call) Return(_a0 error) *MockOutbound_CheckUDP_Call {
-	_c.Call.Return(_a0)
-	return _c
-}
-
-func (_c *MockOutbound_CheckUDP_Call) RunAndReturn(run func(string) error) *MockOutbound_CheckUDP_Call {
-	_c.Call.Return(run)
-	return _c
 }
 
 // TCP provides a mock function with given fields: reqAddr
@@ -122,64 +75,6 @@ func (_c *MockOutbound_TCP_Call) Return(_a0 net.Conn, _a1 error) *MockOutbound_T
 }
 
 func (_c *MockOutbound_TCP_Call) RunAndReturn(run func(string) (net.Conn, error)) *MockOutbound_TCP_Call {
-	_c.Call.Return(run)
-	return _c
-}
-
-// UDP provides a mock function with given fields: reqAddr
-func (_m *MockOutbound) UDP(reqAddr string) (server.UDPConn, error) {
-	ret := _m.Called(reqAddr)
-
-	if len(ret) == 0 {
-		panic("no return value specified for UDP")
-	}
-
-	var r0 server.UDPConn
-	var r1 error
-	if rf, ok := ret.Get(0).(func(string) (server.UDPConn, error)); ok {
-		return rf(reqAddr)
-	}
-	if rf, ok := ret.Get(0).(func(string) server.UDPConn); ok {
-		r0 = rf(reqAddr)
-	} else {
-		if ret.Get(0) != nil {
-			r0 = ret.Get(0).(server.UDPConn)
-		}
-	}
-
-	if rf, ok := ret.Get(1).(func(string) error); ok {
-		r1 = rf(reqAddr)
-	} else {
-		r1 = ret.Error(1)
-	}
-
-	return r0, r1
-}
-
-// MockOutbound_UDP_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'UDP'
-type MockOutbound_UDP_Call struct {
-	*mock.Call
-}
-
-// UDP is a helper method to define mock.On call
-//   - reqAddr string
-func (_e *MockOutbound_Expecter) UDP(reqAddr interface{}) *MockOutbound_UDP_Call {
-	return &MockOutbound_UDP_Call{Call: _e.mock.On("UDP", reqAddr)}
-}
-
-func (_c *MockOutbound_UDP_Call) Run(run func(reqAddr string)) *MockOutbound_UDP_Call {
-	_c.Call.Run(func(args mock.Arguments) {
-		run(args[0].(string))
-	})
-	return _c
-}
-
-func (_c *MockOutbound_UDP_Call) Return(_a0 server.UDPConn, _a1 error) *MockOutbound_UDP_Call {
-	_c.Call.Return(_a0, _a1)
-	return _c
-}
-
-func (_c *MockOutbound_UDP_Call) RunAndReturn(run func(string) (server.UDPConn, error)) *MockOutbound_UDP_Call {
 	_c.Call.Return(run)
 	return _c
 }

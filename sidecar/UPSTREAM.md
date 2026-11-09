@@ -33,7 +33,7 @@
   - `server/copy.go`：双向复制关闭后等待两侧退出，检查短写。
   - 新增取消、配置和复制测试；原有集成测试改为显式使用 test-only 出站，保持测试目的不变。
 - 未修改 QUIC 依赖、拥塞算法、HTTP/3 鉴权字段和 TCP framing。
-- 应用 UDP、嗅探、伪装及 Chrome 相关源码尚未删除；专用入口禁用这些能力，后续再裁剪。
+- 第 2 步先在专用入口禁用应用 UDP、嗅探、伪装及 Chrome；第 9 步已裁剪对应源码，详见 [`PRUNING.md`](PRUNING.md)。
 - 调用方 module 位于 `sidecar/`，通过本地 `replace` 使用本目录；`v2.0.0` 仅是满足 module 主版本的 require 标记，实际源码始终来自本地固定快照及定制补丁。
 - 第 3 步（2026-11-09）：
   - 新增 `observe` 包：本地连接 ID、发送控制器、QUIC 指标快照和 stream 上下文，不包含凭据。
@@ -121,3 +121,10 @@ git rev-parse 832a525:sidecar/hy2-core
 - MC 来源按每 listener 的 sidecar 与受信 connection ID 关联；客户端进程只有单条 QUIC 连接。不同进程的相同 ID 不会混用。
 - 未增加 HTTP stats 服务、管理端口或独立后端；所有游戏内显示及联机验收由用户最后统一执行。
 - 自动回归：Go sidecar 448 个测试/子测试通过、1 平台跳过，静态检查/依赖校验通过；Java runtime 104 通过/1 跳过、mod-common 57、旧 core 171 通过，NeoForge jar 成功。core 本步未修改，最近回归为第 7 步 151 通过。
+
+## 第 9 步 TCP 专用裁剪
+
+- 删除应用 UDP/session/frag、嗅探改写、可配置伪装、Chrome 配置和自动重连 wrapper；应用 padding writer 固定零且 reader 拒绝非零。保留外层 QUIC/UDP、QUIC padding、HTTP/3 鉴权、带宽协商、TCP framing 和 TCP 诊断接口。
+- 无新上游依赖或底层 fork；移除本地不再使用的 x/time 引用，quic-go 仍依赖的 utls/压缩库与许可保留。
+- 对应 API、测试替代和未删除的旧 Java 参考路径见 [`PRUNING.md`](PRUNING.md)。实机验收仍由用户最后统一执行。
+- 最终自动回归：sidecar 448 测试/子测试通过、1 平台跳过；core 111 通过，无失败；两 module vet/tidy/依赖校验通过。Java runtime 104 通过/1 跳过、mod-common 57、旧 Java core 171 通过，NeoForge jar 成功。被裁剪功能的专属测试不再计入；未进行 MC/图形、公网、跨平台运行或 race 验收。

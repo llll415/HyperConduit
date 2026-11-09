@@ -10,7 +10,7 @@ HyperConduit 是面向 **Minecraft 1.21.1 / NeoForge 21.1.252 / Java 21** 的双
 
 - 本分支重构了传输核心，使用新的配置和隧道协议。
 - **不兼容旧版 `hyperconduit.json`、旧版 Mod 或旧协议**，不提供配置迁移或双协议兼容层。
-- 旧 Java lite `core/` 已不再是实际入口，但源码暂时保留，计划第 9 步清理。
+- 旧 Java `core/` 已不再是实际入口；用户最后统一实机验收前暂留源码与参考测试，不长期维护双后端。
 - 客户端与服务端必须安装同版本 Mod 并启用；条件不满足时**不会自动回退**，连接直接失败并显示错误。
 - 未安装 Mod 的玩家仍可通过原版 TCP 加入（服务端保持 `disableVanillaTcp=false`）。
 - 玩家仍填写服务器地址 `host:port`；不需要域名、CA 证书或手动启动 sidecar。
@@ -101,6 +101,7 @@ sidecar 在转发前写入受保护的 `HCMETA01` 元数据（bridge token、pee
 
 - sidecar 基于定制 HY2 core 和 apernet/quic-go，每条 MC TCP 连接对应一条有序 QUIC stream。
 - 使用成熟 QUIC/TLS 实现，不自行实现 QUIC；保留 HTTP/3 鉴权，不承诺与原版 HY2 的产品互通。
+- HY2 core 已裁剪应用 UDP/分片、嗅探改写、可配置伪装、Chrome 指纹、自动重连和随机应用 padding；QUIC 自身的 padding/流控不动。双方必须使用同一版本，详见 [`sidecar/PRUNING.md`](sidecar/PRUNING.md)。
 - 不提供应用层 UDP 转发；Minecraft 的 UDP 查询等能力不在隧道范围内。
 - 服务端只连接管理员配置的固定 target，客户端不能指定任意目标。
 - bridge 元数据只接受 sidecar 的可信观测，不接受 Minecraft 载荷自报。
@@ -138,7 +139,7 @@ jar 会打包当前构建机平台的 sidecar 二进制、版本及 SHA-256 mani
 
 - 第 7 步：列表探测代码与自动回归，图形效果及操作流程待用户验收。
 - 第 8 步：实际指标通道与自动回归，游戏内显示待统一验收。
-- 第 9 步：裁剪旧 Java 核并清理。
+- 第 9 步：HY2 TCP 专用路径裁剪；旧 Java 参考源码待统一验收后清理。
 - 第 10 步：跨平台打包、完整验证与文档收尾。
 
 ## 许可证与第三方

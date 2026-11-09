@@ -20,14 +20,6 @@ func (testConfigOutbound) TCP(reqAddr string) (net.Conn, error) {
 	return nil, errors.ConfigError{Field: "Outbound", Reason: "not available in tests"}
 }
 
-func (testConfigOutbound) UDP(reqAddr string) (UDPConn, error) {
-	return nil, errors.ConfigError{Field: "Outbound", Reason: "not available in tests"}
-}
-
-func (testConfigOutbound) CheckUDP(reqAddr string) error {
-	return nil
-}
-
 type testConfigAuthenticator struct{}
 
 func (testConfigAuthenticator) Authenticate(addr net.Addr, auth string, tx uint64) (bool, string) {

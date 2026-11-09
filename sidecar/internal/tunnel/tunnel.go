@@ -113,7 +113,7 @@ func openServer(parent context.Context, raw config.Config) (*Endpoint, error) {
 			InitialConnectionReceiveWindow: 512 * 1024, MaxConnectionReceiveWindow: 8 * 1024 * 1024,
 			MaxIdleTimeout: time.Duration(c.IdleTimeoutMS) * time.Millisecond, MaxIncomingStreams: c.MaxStreams,
 		},
-		Outbound: outbound, DisableUDP: true,
+		Outbound:              outbound,
 		Authenticator:         statusAuthenticator{tokenAuthenticator{expected: c.Token}, status},
 		CongestionConfig:      server.CongestionConfig{Type: c.Congestion},
 		BandwidthConfig:       server.BandwidthConfig{MaxTx: c.UpBytesPerSecond(), MaxRx: c.DownBytesPerSecond()},
@@ -188,7 +188,6 @@ func openClient(parent context.Context, raw config.Config) (*Endpoint, error) {
 	hy, _, err := client.NewClientContext(connectCtx, &client.Config{
 		ServerAddr: udpAddr, Auth: c.Token, TLSConfig: tlsConfig,
 		QUICConfig: client.QUICConfig{
-			DisableChromeParrot:        true,
 			InitialStreamReceiveWindow: 256 * 1024, MaxStreamReceiveWindow: 4 * 1024 * 1024,
 			InitialConnectionReceiveWindow: 512 * 1024, MaxConnectionReceiveWindow: 8 * 1024 * 1024,
 			MaxIdleTimeout:  time.Duration(c.IdleTimeoutMS) * time.Millisecond,

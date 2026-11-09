@@ -26,7 +26,6 @@ func probeTestContext(t *testing.T) context.Context {
 type probeTestBackend struct {
 	mu  sync.Mutex
 	tcp int
-	udp int
 }
 
 func (b *probeTestBackend) TCP(string) (net.Conn, error) {
@@ -36,19 +35,10 @@ func (b *probeTestBackend) TCP(string) (net.Conn, error) {
 	return nil, errors.New("probe test must not dial TCP")
 }
 
-func (b *probeTestBackend) UDP(string) (server.UDPConn, error) {
-	b.mu.Lock()
-	b.udp++
-	b.mu.Unlock()
-	return nil, errors.New("probe test must not dial UDP")
-}
-
-func (b *probeTestBackend) CheckUDP(string) error { return nil }
-
-func (b *probeTestBackend) counts() (tcp, udp int) {
+func (b *probeTestBackend) count() int {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	return b.tcp, b.udp
+	return b.tcp
 }
 
 type probeTestAuth struct {
@@ -88,7 +78,6 @@ func startProbeServer(t *testing.T, response []byte) (string, *probeTestBackend,
 		Conn:               pc,
 		Outbound:           backend,
 		Authenticator:      auth,
-		DisableUDP:         true,
 		CapabilityResponse: response,
 	})
 	if err != nil {
@@ -109,8 +98,8 @@ func TestCheckEnabled(t *testing.T) {
 	if auth.count() != 0 {
 		t.Fatalf("capability probe authenticated: %d calls", auth.count())
 	}
-	if tcp, udp := backend.counts(); tcp != 0 || udp != 0 {
-		t.Fatalf("capability probe dialed backend: tcp=%d udp=%d", tcp, udp)
+	if tcp := backend.count(); tcp != 0 {
+		t.Fatalf("capability probe dialed backend: tcp=%d", tcp)
 	}
 }
 
@@ -130,8 +119,8 @@ func TestCheckHasNoFilesystemOrTrustSideEffects(t *testing.T) {
 	if auth.count() != 0 {
 		t.Fatalf("capability probe authenticated: %d calls", auth.count())
 	}
-	if tcp, udp := backend.counts(); tcp != 0 || udp != 0 {
-		t.Fatalf("capability probe dialed backend: tcp=%d udp=%d", tcp, udp)
+	if tcp := backend.count(); tcp != 0 {
+		t.Fatalf("capability probe dialed backend: tcp=%d", tcp)
 	}
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -165,8 +154,8 @@ func TestCheckUndeclared(t *testing.T) {
 	if auth.count() != 0 {
 		t.Fatalf("capability probe authenticated: %d calls", auth.count())
 	}
-	if tcp, udp := backend.counts(); tcp != 0 || udp != 0 {
-		t.Fatalf("capability probe dialed backend: tcp=%d udp=%d", tcp, udp)
+	if tcp := backend.count(); tcp != 0 {
+		t.Fatalf("capability probe dialed backend: tcp=%d", tcp)
 	}
 }
 

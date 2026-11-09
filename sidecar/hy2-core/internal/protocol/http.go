@@ -12,7 +12,6 @@ const (
 	RequestHeaderAuth        = "Hysteria-Auth"
 	ResponseHeaderUDPEnabled = "Hysteria-UDP"
 	CommonHeaderCCRX         = "Hysteria-CC-RX"
-	CommonHeaderPadding      = "Hysteria-Padding"
 
 	StatusAuthOK = 233
 )
@@ -41,7 +40,6 @@ func AuthRequestFromHeader(h http.Header) AuthRequest {
 func AuthRequestToHeader(h http.Header, req AuthRequest) {
 	h.Set(RequestHeaderAuth, req.Auth)
 	h.Set(CommonHeaderCCRX, strconv.FormatUint(req.Rx, 10))
-	h.Set(CommonHeaderPadding, authRequestPadding.String())
 }
 
 func AuthResponseFromHeader(h http.Header) AuthResponse {
@@ -64,5 +62,4 @@ func AuthResponseToHeader(h http.Header, resp AuthResponse) {
 	} else {
 		h.Set(CommonHeaderCCRX, strconv.FormatUint(resp.Rx, 10))
 	}
-	h.Set(CommonHeaderPadding, authResponsePadding.String())
 }
