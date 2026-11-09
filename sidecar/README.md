@@ -1,6 +1,6 @@
 # HyperConduit Go sidecar
 
-独立 Go 隧道，尚未接入 Minecraft/Java。仅转发服务端配置的固定目标，不提供应用 UDP 转发或直接 TCP 回退。
+Go 隧道已接入 Java 受管进程和 Minecraft。仅转发服务端配置的固定目标，不提供应用 UDP 转发或直接 TCP 回退；下方 CLI 用于开发诊断，玩家无需手动启动。
 
 ## 目录
 
@@ -9,6 +9,8 @@
 ## 构建
 
 需要 Go 1.26。PowerShell：
+
+Mod 的默认 Gradle 构建打包 `windows-amd64`、`linux-amd64`、`linux-arm64`、`darwin-amd64`、`darwin-arm64` 五个平台。每个平台独立 manifest/SHA-256，运行时按 JVM 的 OS/架构选择；当前不含 Windows arm64。交叉编译和文件校验不代表平台运行通过，实机验收见 [`docs/HY2CORE_ACCEPTANCE.md`](../docs/HY2CORE_ACCEPTANCE.md)。
 
 ```powershell
 cd sidecar

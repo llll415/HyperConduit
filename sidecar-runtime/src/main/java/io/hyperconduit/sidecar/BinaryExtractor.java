@@ -340,8 +340,9 @@ public final class BinaryExtractor {
         }
         try {
             Files.setPosixFilePermissions(file, PosixFilePermissions.fromString("rwxr-xr-x"));
-        } catch (UnsupportedOperationException ignored) {
-            // The filesystem advertised POSIX support but cannot apply permissions.
+            if (!Files.isExecutable(file)) throw new IOException("Sidecar cache does not permit executable files");
+        } catch (UnsupportedOperationException unsupported) {
+            throw new IOException("Cannot set sidecar executable permissions", unsupported);
         }
     }
 

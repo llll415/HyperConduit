@@ -128,3 +128,10 @@ git rev-parse 832a525:sidecar/hy2-core
 - 无新上游依赖或底层 fork；移除本地不再使用的 x/time 引用，quic-go 仍依赖的 utls/压缩库与许可保留。
 - 对应 API、测试替代和未删除的旧 Java 参考路径见 [`PRUNING.md`](PRUNING.md)。实机验收仍由用户最后统一执行。
 - 最终自动回归：sidecar 448 测试/子测试通过、1 平台跳过；core 111 通过，无失败；两 module vet/tidy/依赖校验通过。Java runtime 104 通过/1 跳过、mod-common 57、旧 Java core 171 通过，NeoForge jar 成功。被裁剪功能的专属测试不再计入；未进行 MC/图形、公网、跨平台运行或 race 验收。
+
+## 第 10 步五平台测试包
+
+- 默认 Gradle 构建 Windows amd64、Linux amd64/arm64、macOS amd64/arm64；保留每平台单独构建任务，产物和 manifest 不入 Git。Windows arm64 未打包。
+- 使用 CGO=0、trimpath、禁用 VCS/buildid、固定架构基线，工具链版本进入 Gradle 输入；同机 Go 1.26.4 强制重复构建五个 binary 和最终 NeoForge jar 的 SHA-256 均一致。不承诺跨工具链 bit-for-bit 相同。
+- `BundledPlatformsTest` 验证真实 PE/ELF/Mach-O 架构、提取与哈希、许可资源；`verifySidecarBundle` 和 `verifyDistribution` 检查精确平台集合及最终 jar 文件。runtime 110 通过/1 平台跳过、mod-common 57、旧 Java core 171 通过。
+- 仅 Windows amd64 自动化执行本机 sidecar；其他平台只有交叉编译和文件检查。未进行游戏、公网、平台运行或性能 A/B 验收，详见 `docs/HY2CORE_ACCEPTANCE.md`。

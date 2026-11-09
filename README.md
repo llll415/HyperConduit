@@ -4,7 +4,7 @@ HyperConduit 是面向 **Minecraft 1.21.1 / NeoForge 21.1.252 / Java 21** 的双
 
 > 当前是开发分支，不是可分发版本。
 >
-> 只支持 NeoForge 1.21.1 + Java 21。Go sidecar 已随 jar 打包，但当前只包含构建机平台的二进制；完整平台矩阵属于第 10 步。
+> 只支持 NeoForge 1.21.1 + Java 21。Go sidecar 随 jar 打包；默认构建计划为五平台矩阵（Windows amd64、Linux amd64/arm64、macOS Intel/Apple Silicon），运行时按 JVM 的 OS 与架构自动选择二进制，Windows arm64 不打包。该矩阵构建仍在实现与最终校验中，交叉编译不代表已在对应平台运行，非 Windows amd64 的实机运行尚未验收。
 
 ## 兼容性与迁移
 
@@ -94,8 +94,8 @@ sidecar 在转发前写入受保护的 `HCMETA01` 元数据（bridge token、pee
 
 - 专用服务端 smoke：共存形态已通过。
 - only-tunnel 形态的 Minecraft status 已通过。
-- 尚未验证玩家实际进服跑图、局域网完整流程、公网复杂网络和跨平台运行。
-- 游戏内界面、指标及联机实测由用户最后统一验收；当前通过的是编译与自动化测试。
+- 尚未验证玩家实际进服跑图、局域网完整流程、公网复杂网络和各平台实际运行。
+- 游戏内界面、指标及联机实测由用户最后统一验收；当前通过的是编译与自动化测试。未勾选项目见 [`docs/HY2CORE_ACCEPTANCE.md`](docs/HY2CORE_ACCEPTANCE.md)。
 
 ## 实现边界
 
@@ -120,13 +120,17 @@ sidecar 在转发前写入受保护的 `HCMETA01` 元数据（bridge token、pee
 
 ## 构建
 
-需要 JDK 21 与 **Go 1.26**：
+需要 JDK 21 与 **Go 1.26**。默认使用 PATH 中的 `go`，可用 `-PsidecarGo=<go 可执行文件路径>` 指定。
 
 ```bash
-./gradlew :neoforge:jar -PsidecarGo=<go 可执行文件路径>
+./gradlew :neoforge:jar
 ```
 
-jar 会打包当前构建机平台的 sidecar 二进制、版本及 SHA-256 manifest。Windows/Linux/macOS 的完整构建矩阵、执行权限与 smoke test 属于第 10 步。
+默认构建五平台 sidecar 矩阵：Windows amd64、Linux amd64/arm64、macOS Intel（darwin-amd64）与 Apple Silicon（darwin-arm64）；Windows arm64 不打包。运行时按 JVM 报告的 OS 与架构自动选择对应二进制。
+
+产物位于 `neoforge/build/libs/hyperconduit-neoforge-*.jar`，无需手动启动 sidecar。`./gradlew :neoforge:verifyDistribution` 校验最终 jar 内的五平台二进制、manifest 与 SHA-256；`./gradlew :sidecar-runtime:verifySidecarBundle` 校验打包前的 sidecar bundle（随矩阵构建提供）。
+
+以上仅为自用测试构建，不是已验收发布。交叉编译不等于运行时验证；各平台执行权限、启动与连接 smoke test 仍待用户实机验收。
 
 ## 风险提示
 
@@ -140,7 +144,7 @@ jar 会打包当前构建机平台的 sidecar 二进制、版本及 SHA-256 mani
 - 第 7 步：列表探测代码与自动回归，图形效果及操作流程待用户验收。
 - 第 8 步：实际指标通道与自动回归，游戏内显示待统一验收。
 - 第 9 步：HY2 TCP 专用路径裁剪；旧 Java 参考源码待统一验收后清理。
-- 第 10 步：跨平台打包、完整验证与文档收尾。
+- 第 10 步：五平台矩阵、架构/哈希/许可校验及同工具链重复构建通过；各平台运行与游戏内验收待用户执行。
 
 ## 许可证与第三方
 
