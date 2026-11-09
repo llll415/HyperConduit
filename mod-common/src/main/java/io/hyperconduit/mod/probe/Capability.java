@@ -7,21 +7,11 @@ import com.google.gson.JsonObject;
 public enum Capability {
     CHECKING, ENABLED, DISABLED, UNDECLARED, UNKNOWN, INCOMPATIBLE;
 
-    public static final int PROTOCOL = 1;
+    /** Current capability wire protocol. Different versions are only shown as incompatible. */
+    public static final int PROTOCOL = 2;
 
     public static Capability parse(JsonElement value) {
-        if (value == null) return UNDECLARED;
-        if (!value.isJsonObject()) return UNKNOWN;
-        JsonObject json = value.getAsJsonObject();
-        try {
-            if (json.size() != 2 || !json.has("protocol") || !json.has("enabled")
-                    || !json.get("protocol").isJsonPrimitive() || !json.get("enabled").isJsonPrimitive()
-                    || !json.getAsJsonPrimitive("protocol").isNumber() || !json.getAsJsonPrimitive("enabled").isBoolean()) return UNKNOWN;
-            String protocol = json.get("protocol").getAsString();
-            if (!protocol.matches("[1-9][0-9]{0,8}")) return UNKNOWN;
-            if (Integer.parseInt(protocol) != PROTOCOL) return INCOMPATIBLE;
-            return json.get("enabled").getAsBoolean() ? ENABLED : DISABLED;
-        } catch (RuntimeException invalid) { return UNKNOWN; }
+        return CapabilityDetails.parse(value).state();
     }
 
     public static Capability fromProbe(String state) {
@@ -34,11 +24,14 @@ public enum Capability {
         };
     }
 
+    /** Legacy state-only helper; the produced object is a complete five-field declaration. */
     public static JsonObject declaration(boolean enabled) {
-        JsonObject json = new JsonObject();
-        json.addProperty("protocol", PROTOCOL);
-        json.addProperty("enabled", enabled);
-        return json;
+        return declaration(enabled, false, false, false);
+    }
+
+    public static JsonObject declaration(boolean enabled, boolean tcpAllowed,
+                                         boolean disableBrutal, boolean tokenRequired) {
+        return CapabilityDetails.declaration(enabled, tcpAllowed, disableBrutal, tokenRequired).toJson();
     }
 
     public boolean declared() { return this == ENABLED || this == DISABLED || this == INCOMPATIBLE; }

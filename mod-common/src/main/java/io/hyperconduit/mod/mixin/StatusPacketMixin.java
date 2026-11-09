@@ -21,30 +21,29 @@ public abstract class StatusPacketMixin {
     private static Object hyperconduit$read(FriendlyByteBuf buffer, Codec<ServerStatus> codec) {
         String raw = buffer.readUtf();
         JsonElement json = JsonParser.parseString(raw);
+        // Keep vanilla's decode/validation: a genuinely invalid status must still fail.
         ServerStatus status = codec.parse(JsonOps.INSTANCE, json).getOrThrow(message -> new IllegalArgumentException(message));
-        ((CapabilityStatus) (Object) status).hyperconduit$capability(CapabilityJson.read(raw));
+        // Only the advisory capability attachment is allowed to fail.
+        StatusAugmentation.attach(status, raw);
         return status;
     }
 
     @Redirect(method = "write", at = @At(value = "INVOKE",
             target = "Lnet/minecraft/network/FriendlyByteBuf;writeJsonWithCodec(Lcom/mojang/serialization/Codec;Ljava/lang/Object;)V"))
     private void hyperconduit$write(FriendlyByteBuf buffer, Codec<ServerStatus> codec, Object value) {
-        JsonElement json = codec.encodeStart(JsonOps.INSTANCE, (ServerStatus) value).getOrThrow(message -> new IllegalArgumentException(message));
-        buffer.writeUtf(hyperconduit$decorate(json, (ServerStatus) value).toString());
+        ServerStatus status = (ServerStatus) value;
+        JsonElement json = codec.encodeStart(JsonOps.INSTANCE, status).getOrThrow(message -> new IllegalArgumentException(message));
+        buffer.writeUtf(StatusAugmentation.decorate(json, StatusAugmentation.detailsOf(status)).toString());
     }
 
-    @Redirect(method = "write", at = @At(value = "INVOKE",
+    @Redirect(method = "write", require = 0, at = @At(value = "INVOKE",
             target = "Lnet/minecraft/network/FriendlyByteBuf;writeUtf(Ljava/lang/String;)Lnet/minecraft/network/FriendlyByteBuf;"))
     private FriendlyByteBuf hyperconduit$cached(FriendlyByteBuf buffer, String cached) {
-        try { return buffer.writeUtf(hyperconduit$decorate(JsonParser.parseString(cached), status()).toString()); }
-        catch (JsonParseException invalid) { return buffer.writeUtf(cached); }
-    }
-
-    private static JsonElement hyperconduit$decorate(JsonElement json, ServerStatus status) {
-        Capability state = ((CapabilityStatus) (Object) status).hyperconduit$capability();
-        if (json.isJsonObject() && (state == Capability.ENABLED || state == Capability.DISABLED)) {
-            json.getAsJsonObject().add("hyperconduit", Capability.declaration(state == Capability.ENABLED));
+        try {
+            return buffer.writeUtf(StatusAugmentation.decorate(cached, StatusAugmentation.detailsOf(status())));
+        } catch (RuntimeException ignored) {
+            // Decoration is advisory; keep the server's original cached status on any failure.
+            return buffer.writeUtf(cached);
         }
-        return json;
     }
 }

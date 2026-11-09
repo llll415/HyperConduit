@@ -90,10 +90,16 @@ func startProbeServer(t *testing.T, response []byte) (string, *probeTestBackend,
 }
 
 func TestCheckEnabled(t *testing.T) {
-	addr, backend, auth := startProbeServer(t, []byte(`{"protocol":1,"enabled":true}`))
+	addr, backend, auth := startProbeServer(t, []byte(`{"protocol":2,"enabled":true,"tcpAllowed":true,"disableBrutal":false,"tokenRequired":true}`))
 	result := Check(probeTestContext(t), addr)
 	if result.State != StateEnabled {
 		t.Fatalf("state = %q, want %q", result.State, StateEnabled)
+	}
+	if result.Capability == nil {
+		t.Fatal("enabled result carries no declaration")
+	}
+	if !result.Capability.TCPAllowed || result.Capability.DisableBrutal || !result.Capability.TokenRequired {
+		t.Fatalf("unexpected policy: %+v", *result.Capability)
 	}
 	if auth.count() != 0 {
 		t.Fatalf("capability probe authenticated: %d calls", auth.count())
@@ -112,7 +118,7 @@ func TestCheckHasNoFilesystemOrTrustSideEffects(t *testing.T) {
 	t.Setenv("TMP", dir)
 	t.Setenv("TEMP", dir)
 
-	address, backend, auth := startProbeServer(t, []byte(`{"protocol":1,"enabled":true}`))
+	address, backend, auth := startProbeServer(t, []byte(`{"protocol":2,"enabled":true,"tcpAllowed":true,"disableBrutal":false,"tokenRequired":true}`))
 	if result := Check(probeTestContext(t), address); result.State != StateEnabled {
 		t.Fatalf("state = %q, want %q", result.State, StateEnabled)
 	}
@@ -132,16 +138,25 @@ func TestCheckHasNoFilesystemOrTrustSideEffects(t *testing.T) {
 }
 
 func TestCheckDisabled(t *testing.T) {
-	addr, _, _ := startProbeServer(t, []byte(`{"protocol":1,"enabled":false}`))
-	if result := Check(probeTestContext(t), addr); result.State != StateDisabled {
+	addr, _, _ := startProbeServer(t, []byte(`{"protocol":2,"enabled":false,"tcpAllowed":false,"disableBrutal":true,"tokenRequired":false}`))
+	result := Check(probeTestContext(t), addr)
+	if result.State != StateDisabled {
 		t.Fatalf("state = %q, want %q", result.State, StateDisabled)
+	}
+	if result.Capability == nil || result.Capability.Enabled {
+		t.Fatalf("disabled result declaration = %+v", result.Capability)
 	}
 }
 
 func TestCheckIncompatible(t *testing.T) {
-	addr, _, _ := startProbeServer(t, []byte(`{"protocol":2,"enabled":true}`))
-	if result := Check(probeTestContext(t), addr); result.State != StateIncompatible {
+	// The old two-field schema is recognized as incompatible, never as policy.
+	addr, _, _ := startProbeServer(t, []byte(`{"protocol":1,"enabled":true}`))
+	result := Check(probeTestContext(t), addr)
+	if result.State != StateIncompatible {
 		t.Fatalf("state = %q, want %q", result.State, StateIncompatible)
+	}
+	if result.Capability != nil {
+		t.Fatalf("incompatible result exposed policy: %+v", *result.Capability)
 	}
 }
 
@@ -160,7 +175,7 @@ func TestCheckUndeclared(t *testing.T) {
 }
 
 func TestCheckUnknownForInvalidDeclaration(t *testing.T) {
-	addr, _, _ := startProbeServer(t, []byte(`{"protocol":1,"enabled":true,"extra":1}`))
+	addr, _, _ := startProbeServer(t, []byte(`{"protocol":2,"enabled":true,"tcpAllowed":true,"disableBrutal":false,"tokenRequired":true,"extra":1}`))
 	if result := Check(probeTestContext(t), addr); result.State != StateUnknown {
 		t.Fatalf("state = %q, want %q", result.State, StateUnknown)
 	}
@@ -251,37 +266,44 @@ func TestCheckTimeoutAgainstSilentServer(t *testing.T) {
 }
 
 func TestParseCapabilityStrict(t *testing.T) {
+	const full = `"enabled":true,"tcpAllowed":true,"disableBrutal":false,"tokenRequired":true`
 	tests := []struct {
 		name     string
 		input    string
 		protocol int
 		enabled  bool
+		tcp      bool
 		wantErr  bool
 	}{
-		{name: "enabled", input: `{"protocol":1,"enabled":true}`, protocol: 1, enabled: true},
-		{name: "disabled", input: `{"protocol":1,"enabled":false}`, protocol: 1, enabled: false},
-		{name: "future protocol", input: `{"protocol":2,"enabled":true}`, protocol: 2, enabled: true},
-		{name: "whitespace", input: " \n{\"protocol\":1,\"enabled\":true}\t", protocol: 1, enabled: true},
-		{name: "missing enabled", input: `{"protocol":1}`, wantErr: true},
+		{name: "enabled", input: `{"protocol":2,` + full + `}`, protocol: 2, enabled: true, tcp: true},
+		{name: "disabled", input: `{"protocol":2,"enabled":false,"tcpAllowed":false,"disableBrutal":true,"tokenRequired":false}`, protocol: 2, enabled: false},
+		// Foreign protocols expose no policy, so Enabled stays false even if the
+		// remote sent enabled=true.
+		{name: "old protocol", input: `{"protocol":1,"enabled":true}`, protocol: 1, enabled: false},
+		{name: "future protocol", input: `{"protocol":3,"enabled":true}`, protocol: 3, enabled: false},
+		{name: "whitespace", input: " \n{\"protocol\":2," + full + "}\t", protocol: 2, enabled: true, tcp: true},
+		{name: "missing enabled", input: `{"protocol":2,"tcpAllowed":true,"disableBrutal":false,"tokenRequired":true}`, wantErr: true},
+		{name: "missing tcpAllowed", input: `{"protocol":2,"enabled":true,"disableBrutal":false,"tokenRequired":true}`, wantErr: true},
 		{name: "missing protocol", input: `{"enabled":true}`, wantErr: true},
-		{name: "unknown field", input: `{"protocol":1,"enabled":true,"extra":1}`, wantErr: true},
-		{name: "duplicate protocol", input: `{"protocol":1,"enabled":true,"protocol":2}`, wantErr: true},
-		{name: "duplicate enabled", input: `{"protocol":1,"enabled":true,"enabled":false}`, wantErr: true},
+		{name: "unknown field", input: `{"protocol":2,` + full + `,"extra":1}`, wantErr: true},
+		{name: "duplicate protocol", input: `{"protocol":2,` + full + `,"protocol":2}`, wantErr: true},
+		{name: "duplicate enabled", input: `{"protocol":2,` + full + `,"enabled":false}`, wantErr: true},
 		{name: "null protocol", input: `{"protocol":null,"enabled":true}`, wantErr: true},
-		{name: "null enabled", input: `{"protocol":1,"enabled":null}`, wantErr: true},
-		{name: "fractional protocol", input: `{"protocol":1.5,"enabled":true}`, wantErr: true},
-		{name: "string protocol", input: `{"protocol":"1","enabled":true}`, wantErr: true},
+		{name: "null enabled", input: `{"protocol":2,"enabled":null,"tcpAllowed":true,"disableBrutal":false,"tokenRequired":true}`, wantErr: true},
+		{name: "fractional protocol", input: `{"protocol":2.0,"enabled":true}`, wantErr: true},
+		{name: "exponent protocol", input: `{"protocol":2e0,"enabled":true}`, wantErr: true},
+		{name: "string protocol", input: `{"protocol":"2","enabled":true}`, wantErr: true},
 		{name: "zero protocol", input: `{"protocol":0,"enabled":true}`, wantErr: true},
 		{name: "negative protocol", input: `{"protocol":-1,"enabled":true}`, wantErr: true},
 		{name: "protocol overflow", input: `{"protocol":1000000000,"enabled":true}`, wantErr: true},
-		{name: "numeric enabled", input: `{"protocol":1,"enabled":1}`, wantErr: true},
+		{name: "numeric enabled", input: `{"protocol":2,"enabled":1,"tcpAllowed":true,"disableBrutal":false,"tokenRequired":true}`, wantErr: true},
 		{name: "not object", input: `[]`, wantErr: true},
 		{name: "null", input: `null`, wantErr: true},
-		{name: "trailing data", input: `{"protocol":1,"enabled":true} {}`, wantErr: true},
+		{name: "trailing data", input: `{"protocol":2,` + full + `} {}`, wantErr: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			protocol, enabled, err := parseCapability([]byte(tt.input))
+			declaration, err := parseCapability([]byte(tt.input))
 			if tt.wantErr {
 				if err == nil {
 					t.Fatalf("parseCapability(%q) succeeded, want error", tt.input)
@@ -291,9 +313,9 @@ func TestParseCapabilityStrict(t *testing.T) {
 			if err != nil {
 				t.Fatalf("parseCapability(%q): %v", tt.input, err)
 			}
-			if protocol != tt.protocol || enabled != tt.enabled {
-				t.Fatalf("parseCapability(%q) = (%d,%v), want (%d,%v)",
-					tt.input, protocol, enabled, tt.protocol, tt.enabled)
+			if declaration.Protocol != tt.protocol || declaration.Enabled != tt.enabled || declaration.TCPAllowed != tt.tcp {
+				t.Fatalf("parseCapability(%q) = %+v, want protocol=%d enabled=%v tcp=%v",
+					tt.input, declaration, tt.protocol, tt.enabled, tt.tcp)
 			}
 		})
 	}

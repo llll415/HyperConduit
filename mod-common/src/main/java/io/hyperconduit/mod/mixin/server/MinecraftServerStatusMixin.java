@@ -13,8 +13,9 @@ public abstract class MinecraftServerStatusMixin {
     @Inject(method = "buildServerStatus", at = @At("RETURN"))
     private void hyperconduit$declaration(CallbackInfoReturnable<ServerStatus> ci) {
         var listener = ((MinecraftServer) (Object) this).getConnection();
-        ((CapabilityStatus) (Object) ci.getReturnValue()).hyperconduit$capability(
-                listener != null && ((TunnelListenerState) listener).hyperconduit$acceptsTunnels()
-                        ? Capability.ENABLED : Capability.DISABLED);
+        CapabilityDetails declaration = listener == null
+                ? CapabilityDetails.declaration(false, false, false, false)
+                : ((TunnelListenerState) listener).hyperconduit$declaration();
+        ((CapabilityStatus) (Object) ci.getReturnValue()).hyperconduit$details(declaration);
     }
 }

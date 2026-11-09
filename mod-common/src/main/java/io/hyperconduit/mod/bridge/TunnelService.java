@@ -35,13 +35,16 @@ public final class TunnelService {
     }
 
     public static SidecarProcess server(HyperConduitConfig config, InetSocketAddress listen,
-                                         InetSocketAddress backend, String bridgeToken) throws IOException {
+                                         InetSocketAddress backend, String bridgeToken,
+                                         boolean tcpAllowed) throws IOException {
         Map<String, Object> values = common(config);
         values.put("listen", format(listen));
         values.put("target", format(backend));
         values.put("token", config.serverToken);
         values.put("bridgeToken", bridgeToken);
         values.put("disableBrutal", config.disableBrutal);
+        // Snapshot of the public TCP listener at start; the sidecar never re-reads it.
+        values.put("tcpAllowed", tcpAllowed);
         return start(config, "server", values);
     }
 

@@ -47,10 +47,11 @@ type readyEvent struct {
 }
 
 type resultEvent struct {
-	Version int    `json:"version"`
-	Event   string `json:"event"`
-	ID      int64  `json:"id"`
-	State   string `json:"state"`
+	Version    int                `json:"version"`
+	Event      string             `json:"event"`
+	ID         int64              `json:"id"`
+	State      string             `json:"state"`
+	Capability *probe.Declaration `json:"capability,omitempty"`
 }
 
 type probeRunner struct {
@@ -161,7 +162,7 @@ func (r *probeRunner) worker() {
 				// parent may already be closing stdout.
 				continue
 			}
-			if err := r.writeResult(job.id, normalizeState(result.State)); err != nil {
+			if err := r.writeResult(job.id, result); err != nil {
 				r.fail(err)
 				return
 			}
@@ -277,7 +278,7 @@ func (r *probeRunner) submit(id int64, server string) error {
 	default:
 		// The bounded queue is full. Never block the input loop.
 		r.finish(job)
-		if err := r.writeResult(id, probe.StateUnknown); err != nil {
+		if err := r.writeResult(id, probe.Result{State: probe.StateUnknown}); err != nil {
 			r.fail(err)
 		}
 		return nil
@@ -302,8 +303,23 @@ func (r *probeRunner) finish(job probeJob) {
 	job.task.cancel()
 }
 
-func (r *probeRunner) writeResult(id int64, state string) error {
-	return r.writeEvent(resultEvent{Version: 1, Event: "result", ID: id, State: state})
+// writeResult emits the capability object only for a valid compatible
+// declaration. A checker that claims enabled/disabled without a matching
+// object is downgraded to unknown rather than fabricating policy.
+func (r *probeRunner) writeResult(id int64, result probe.Result) error {
+	state := normalizeState(result.State)
+	event := resultEvent{Version: 1, Event: "result", ID: id, State: state}
+	if state == probe.StateEnabled || state == probe.StateDisabled {
+		capability := result.Capability
+		if capability == nil || capability.Protocol != probe.Protocol ||
+			capability.Enabled != (state == probe.StateEnabled) {
+			event.State = probe.StateUnknown
+		} else {
+			copy := *capability
+			event.Capability = &copy
+		}
+	}
+	return r.writeEvent(event)
 }
 
 // writeEvent serializes every stdout write. It can block if the parent stops

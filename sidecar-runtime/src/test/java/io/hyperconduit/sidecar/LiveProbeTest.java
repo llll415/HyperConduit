@@ -58,6 +58,16 @@ class LiveProbeTest {
                 long pid = probe.pid();
 
                 assertEquals("enabled", probe.probe(address).get(10, TimeUnit.SECONDS));
+                ProbeProcess.Details details = probe.probeDetails(address).get(10, TimeUnit.SECONDS);
+                assertEquals("enabled", details.state());
+                assertTrue(details.declared());
+                assertEquals(ProbeProcess.CAPABILITY_PROTOCOL, details.capability().protocol());
+                assertTrue(details.capability().enabled());
+                // The sidecar itself has no public TCP listener; Java passes the snapshot.
+                assertFalse(details.capability().tcpAllowed());
+                assertFalse(details.capability().disableBrutal());
+                // tokenRequired is a boolean; the token value never appears on the wire.
+                assertTrue(details.capability().tokenRequired());
                 assertEquals("enabled", probe.probe(address).get(10, TimeUnit.SECONDS));
                 assertEquals(pid, probe.pid(), "the probe process must be reused");
                 assertTrue(probe.isAlive());

@@ -4,7 +4,11 @@ import io.hyperconduit.mod.bridge.TunnelService;
 import io.hyperconduit.mod.bridge.TunnelMetrics;
 import io.hyperconduit.mod.config.ConfigHolder;
 import io.hyperconduit.mod.config.HyperConduitConfig;
+import io.hyperconduit.mod.probe.CapabilityDetails;
+import io.hyperconduit.mod.probe.CapabilityListenerRegistry;
+import io.hyperconduit.mod.probe.TunnelListenerState;
 import io.hyperconduit.sidecar.BridgeInitializer;
+import io.hyperconduit.sidecar.SidecarException;
 import io.hyperconduit.sidecar.SidecarProcess;
 import io.netty.bootstrap.ServerBootstrap;
 import io.netty.channel.ChannelFuture;
@@ -27,12 +31,17 @@ import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.TimeUnit;
 
 @Mixin(ServerConnectionListener.class)
-public abstract class ServerConnectionListenerMixin implements io.hyperconduit.mod.probe.TunnelListenerState {
+public abstract class ServerConnectionListenerMixin implements TunnelListenerState {
     @Unique private final List<ChannelFuture> hyperconduit$backends = new CopyOnWriteArrayList<>();
     @Unique private final List<SidecarProcess> hyperconduit$children = new CopyOnWriteArrayList<>();
+    @Unique private final CapabilityListenerRegistry hyperconduit$listeners = new CapabilityListenerRegistry();
 
     @Override public boolean hyperconduit$acceptsTunnels() {
-        return hyperconduit$children.stream().anyMatch(SidecarProcess::isAlive);
+        return hyperconduit$listeners.anySidecarAlive();
+    }
+
+    @Override public CapabilityDetails hyperconduit$declaration() {
+        return hyperconduit$listeners.declaration();
     }
 
     /**
@@ -60,21 +69,27 @@ public abstract class ServerConnectionListenerMixin implements io.hyperconduit.m
     @Unique
     private ChannelFuture hyperconduit$bindInternal(ServerBootstrap bootstrap) throws Exception {
         HyperConduitConfig current = ConfigHolder.get();
-        if (current == null || !current.enabled) return bootstrap.bind();
-        HyperConduitConfig config = current.copy();
-        // Youer's bind(SocketAddress) also serves Unix-domain sockets; only tunnel TCP.
-        if (!(bootstrap.config().localAddress() instanceof InetSocketAddress requested)) {
-            return bootstrap.bind();
+        // Domain sockets are not public Minecraft TCP endpoints, even with the tunnel disabled.
+        if (!(bootstrap.config().localAddress() instanceof InetSocketAddress requested)) return bootstrap.bind();
+        if (current == null || !current.enabled) {
+            // Vanilla-only listener: the registry learns tcpAllowed only after bind succeeds.
+            ChannelFuture vanilla = bootstrap.bind();
+            hyperconduit$listeners.add(vanilla, false, false);
+            return vanilla;
         }
+        HyperConduitConfig config = current.copy();
         if (config.disableVanillaTcp && requested.getPort() == 0) {
-            throw new java.io.IOException("HyperConduit tunnel-only mode requires a fixed advertised port");
+            throw new SidecarException("listener_port_required");
         }
         ChannelFuture vanilla = null;
         ChannelFuture backend = null;
         SidecarProcess child = null;
+        CapabilityListenerRegistry.Handle handle = null;
         try {
             if (!config.disableVanillaTcp) vanilla = bootstrap.bind().syncUninterruptibly();
             int port = vanilla == null ? requested.getPort() : ((InetSocketAddress) vanilla.channel().localAddress()).getPort();
+            // Snapshot this listener's policy now; later config edits cannot change it.
+            handle = hyperconduit$listeners.add(vanilla, config.disableBrutal, !config.serverToken.isEmpty());
             byte[] random = new byte[32];
             new SecureRandom().nextBytes(random);
             String secret = HexFormat.of().formatHex(random);
@@ -89,7 +104,8 @@ public abstract class ServerConnectionListenerMixin implements io.hyperconduit.m
                     .localAddress(new InetSocketAddress(InetAddress.getByName("127.0.0.1"), 0));
             backend = privateBootstrap.bind().syncUninterruptibly();
             InetSocketAddress udp = new InetSocketAddress(requested.getAddress(), port);
-            child = TunnelService.server(config, udp, (InetSocketAddress) backend.channel().localAddress(), secret);
+            child = TunnelService.server(config, udp, (InetSocketAddress) backend.channel().localAddress(),
+                    secret, vanilla != null);
             child.ready().get(config.connectTimeoutMs + 6000L, TimeUnit.MILLISECONDS);
             processRef.set(child);
             child.enableTelemetry();
@@ -97,7 +113,14 @@ public abstract class ServerConnectionListenerMixin implements io.hyperconduit.m
             hyperconduit$children.add(child);
             ChannelFuture ownedBackend = backend;
             SidecarProcess ownedChild = child;
-            child.exit().thenAccept(code -> ownedBackend.channel().close());
+            CapabilityListenerRegistry.Handle ownedHandle = handle;
+            ownedHandle.observeSidecar(ownedChild::isAlive);
+            child.exit().thenAccept(code -> {
+                ownedBackend.channel().close();
+                // Keep the public-TCP fact until its own closeFuture removes the entry;
+                // only enabled must disappear here.
+                ownedHandle.sidecarAlive(false);
+            });
             backend.channel().closeFuture().addListener(future -> Thread.ofVirtual().start(ownedChild::close));
             if (vanilla != null) {
                 vanilla.channel().closeFuture().addListener(future -> ownedBackend.channel().close());
@@ -106,11 +129,12 @@ public abstract class ServerConnectionListenerMixin implements io.hyperconduit.m
             // Minecraft/LAN still advertises the requested external port; its
             // private backend's actual random port is never published to peers.
             return backend;
-        } catch (Exception failure) {
+        } catch (Exception ignored) {
+            if (handle != null) handle.remove();
             if (child != null) child.close();
             if (backend != null) backend.channel().close();
             if (vanilla != null) vanilla.channel().close();
-            throw new java.io.IOException("HyperConduit listener failed", failure);
+            throw new SidecarException("listener_failed");
         }
     }
 
@@ -120,5 +144,6 @@ public abstract class ServerConnectionListenerMixin implements io.hyperconduit.m
         hyperconduit$children.forEach(SidecarProcess::close);
         hyperconduit$backends.clear();
         hyperconduit$children.clear();
+        hyperconduit$listeners.clear();
     }
 }

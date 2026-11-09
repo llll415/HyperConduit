@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/json"
 	"errors"
 	"io"
 	"net"
@@ -17,12 +18,19 @@ import (
 	"github.com/llll415/HyperConduit/sidecar/internal/config"
 	"github.com/llll415/HyperConduit/sidecar/internal/identity"
 	"github.com/llll415/HyperConduit/sidecar/internal/privatefile"
+	"github.com/llll415/HyperConduit/sidecar/internal/probe"
 )
 
-// capabilityResponse is the fixed, public declaration served before
-// authentication. It is intentionally a compile-time constant: probing must not
-// depend on server configuration, credentials, or identity.
-const capabilityResponse = `{"protocol":1,"enabled":true}`
+// capabilityResponse is the public declaration served before authentication. It
+// reflects the running server's actual config, never a credential value.
+func capabilityResponse(c config.Config) []byte {
+	body, err := json.Marshal(probe.NewDeclaration(true, c.TCPAllowed, c.DisableBrutal, c.Token != ""))
+	if err != nil {
+		// Never invent an open-auth policy if declaration serialization changes in the future.
+		return nil
+	}
+	return body
+}
 
 // Endpoint owns every socket and copy loop created for one role. No reconnect or
 // direct-TCP fallback is performed. READY only describes this endpoint's listener.
@@ -120,7 +128,7 @@ func openServer(parent context.Context, raw config.Config) (*Endpoint, error) {
 		IgnoreClientBandwidth: c.DisableBrutal,
 		RequestTimeout:        time.Duration(c.RequestTimeoutMS) * time.Millisecond,
 		MaxConnections:        c.MaxConnections,
-		CapabilityResponse:    []byte(capabilityResponse),
+		CapabilityResponse:    capabilityResponse(c),
 		ConnectionObserver:    status.connection,
 		ErrorObserver:         func(err error) { status.record(classifyError("request", err)) },
 	})

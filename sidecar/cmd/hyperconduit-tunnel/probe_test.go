@@ -89,10 +89,16 @@ func startCmdProbeServer(t *testing.T, response []byte) (string, *cmdProbeBacken
 }
 
 type cmdProbeEvent struct {
-	Version int    `json:"version"`
-	Event   string `json:"event"`
-	ID      int64  `json:"id"`
-	State   string `json:"state"`
+	Version    int                `json:"version"`
+	Event      string             `json:"event"`
+	ID         int64              `json:"id"`
+	State      string             `json:"state"`
+	Capability *probe.Declaration `json:"capability"`
+}
+
+func enabledDeclaration() *probe.Declaration {
+	d := probe.NewDeclaration(true, true, false, true)
+	return &d
 }
 
 func nextCmdProbeEvent(t *testing.T, events <-chan []byte) cmdProbeEvent {
@@ -138,9 +144,9 @@ func TestProbeWorkerRealCapabilityServer(t *testing.T) {
 		response []byte
 		state    string
 	}{
-		{name: "enabled", response: []byte(`{"protocol":1,"enabled":true}`), state: probe.StateEnabled},
-		{name: "disabled", response: []byte(`{"protocol":1,"enabled":false}`), state: probe.StateDisabled},
-		{name: "incompatible", response: []byte(`{"protocol":2,"enabled":true}`), state: probe.StateIncompatible},
+		{name: "enabled", response: []byte(`{"protocol":2,"enabled":true,"tcpAllowed":true,"disableBrutal":false,"tokenRequired":true}`), state: probe.StateEnabled},
+		{name: "disabled", response: []byte(`{"protocol":2,"enabled":false,"tcpAllowed":false,"disableBrutal":true,"tokenRequired":false}`), state: probe.StateDisabled},
+		{name: "incompatible", response: []byte(`{"protocol":1,"enabled":true}`), state: probe.StateIncompatible},
 		{name: "undeclared", response: nil, state: probe.StateUndeclared},
 	}
 	for _, tt := range tests {
@@ -164,6 +170,17 @@ func TestProbeWorkerRealCapabilityServer(t *testing.T) {
 			result := nextCmdProbeEvent(t, events)
 			if result.Version != 1 || result.Event != "result" || result.ID != 1 || result.State != tt.state {
 				t.Fatalf("unexpected result: %+v", result)
+			}
+			declared := tt.state == probe.StateEnabled || tt.state == probe.StateDisabled
+			if declared != (result.Capability != nil) {
+				t.Fatalf("capability presence = %v, want declared=%v: %+v",
+					result.Capability != nil, declared, result)
+			}
+			if declared && result.Capability.Protocol != probe.Protocol {
+				t.Fatalf("capability protocol = %d, want %d", result.Capability.Protocol, probe.Protocol)
+			}
+			if tt.state == probe.StateEnabled && !result.Capability.TCPAllowed {
+				t.Fatalf("enabled result lost tcpAllowed: %+v", *result.Capability)
 			}
 			if auth.count() != 0 {
 				t.Fatalf("probe authenticated: %d calls", auth.count())
@@ -197,7 +214,7 @@ func TestProbeWorkerConcurrencyBoundsAndReuse(t *testing.T) {
 		defer current.Add(-1)
 		select {
 		case <-release:
-			return probe.Result{State: probe.StateEnabled}
+			return probe.Result{State: probe.StateEnabled, Capability: enabledDeclaration()}
 		case <-ctx.Done():
 			return probe.Result{State: probe.StateUnknown}
 		}
@@ -308,7 +325,7 @@ func TestProbeWorkerCancel(t *testing.T) {
 			close(canceled)
 			return probe.Result{State: probe.StateUnknown}
 		}
-		return probe.Result{State: probe.StateEnabled}
+		return probe.Result{State: probe.StateEnabled, Capability: enabledDeclaration()}
 	}
 
 	pr, pw := io.Pipe()

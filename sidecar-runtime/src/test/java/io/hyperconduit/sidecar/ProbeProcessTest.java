@@ -18,6 +18,8 @@ import java.util.concurrent.TimeUnit;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -48,6 +50,91 @@ class ProbeProcessTest {
             closeQuietly(process);
         }
         assertEquals(0, process.exit().get(TIMEOUT_SECONDS, TimeUnit.SECONDS).intValue());
+    }
+
+    @Test
+    void probeDetailsCarriesPolicyOnlyForValidDeclarations(@TempDir Path workingDirectory) throws Exception {
+        ProbeProcess process = start(workingDirectory, "ready");
+        try {
+            process.ready().get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
+
+            ProbeProcess.Details enabled = process.probeDetails(server(1001)).get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
+            assertEquals("enabled", enabled.state());
+            assertTrue(enabled.declared());
+            assertNotNull(enabled.capability());
+            assertEquals(ProbeProcess.CAPABILITY_PROTOCOL, enabled.capability().protocol());
+            assertTrue(enabled.capability().enabled());
+            assertTrue(enabled.capability().tcpAllowed());
+            assertFalse(enabled.capability().disableBrutal());
+            assertTrue(enabled.capability().tokenRequired());
+
+            ProbeProcess.Details disabled = process.probeDetails(server(1002)).get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
+            assertEquals("disabled", disabled.state());
+            assertNotNull(disabled.capability());
+            assertFalse(disabled.capability().enabled());
+
+            ProbeProcess.Details unknown = process.probeDetails(server(1004)).get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
+            assertEquals("unknown", unknown.state());
+            assertNull(unknown.capability(), "unknown must never expose policy");
+            assertFalse(unknown.declared());
+        } finally {
+            closeQuietly(process);
+        }
+    }
+
+    @Test
+    void declarationRequiresCompleteCapabilityObject(@TempDir Path workingDirectory) throws Exception {
+        ProbeProcess process = start(workingDirectory, "missingCapability");
+        try {
+            process.ready().get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
+            awaitFailure(process.probe(server(1001)), "protocol_capability");
+        } finally {
+            closeQuietly(process);
+        }
+    }
+
+    @Test
+    void capabilityObjectIsStrictlyValidated(@TempDir Path workingDirectory) throws Exception {
+        for (String mode : List.of("badCapabilityProtocol", "duplicateCapabilityField",
+                "unknownCapabilityField", "nonBooleanCapability")) {
+            ProbeProcess process = start(workingDirectory, mode);
+            try {
+                process.ready().get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
+                awaitFailure(process.probe(server(1001)), "protocol_invalid");
+            } finally {
+                closeQuietly(process);
+            }
+        }
+    }
+
+    @Test
+    void capabilityObjectIsForbiddenWithoutADeclaration(@TempDir Path workingDirectory) throws Exception {
+        for (String mode : List.of("capabilityOnUnknown", "capabilityWrongEnabled")) {
+            ProbeProcess process = start(workingDirectory, mode);
+            try {
+                process.ready().get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
+                awaitFailure(process.probe(server(1001)), "protocol_capability");
+            } finally {
+                closeQuietly(process);
+            }
+        }
+    }
+
+    @Test
+    void probeDetailsCancellationSendsCancelCommand(@TempDir Path workingDirectory) throws Exception {
+        Path marker = workingDirectory.resolve("probe-seen");
+        ProbeProcess process = startCommand(workingDirectory, "cancelExits", marker.toString());
+        try {
+            process.ready().get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
+            CompletableFuture<ProbeProcess.Details> result = process.probeDetails(server(1001));
+            awaitFile(marker);
+
+            assertTrue(result.cancel(true));
+            assertEquals(0, process.exit().get(TIMEOUT_SECONDS, TimeUnit.SECONDS).intValue());
+            assertFalse(process.isAlive(), "the fixture exits only after receiving cancel");
+        } finally {
+            closeQuietly(process);
+        }
     }
 
     @Test

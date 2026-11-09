@@ -7,6 +7,8 @@ import net.minecraft.client.gui.GuiGraphics;
 import net.minecraft.client.gui.screens.multiplayer.JoinMultiplayerScreen;
 import net.minecraft.client.multiplayer.ServerData;
 import net.minecraft.network.chat.Component;
+import net.minecraft.network.chat.FormattedText;
+import net.minecraft.util.FormattedCharSequence;
 import org.spongepowered.asm.mixin.Final;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Shadow;
@@ -14,6 +16,9 @@ import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.Redirect;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
+
+import java.util.ArrayList;
+import java.util.List;
 
 @Mixin(targets = "net.minecraft.client.gui.screens.multiplayer.ServerSelectionList$OnlineServerEntry")
 public abstract class ServerEntryMixin {
@@ -23,7 +28,7 @@ public abstract class ServerEntryMixin {
     // Only the right-aligned Component has this overload; name and MOTD use other overloads.
     // Reserve the badge before vanilla computes both text and player-list hover bounds.
     @Redirect(method = "render", at = @At(value = "INVOKE", target = "Lnet/minecraft/client/gui/Font;width(Lnet/minecraft/network/chat/FormattedText;)I"))
-    private int hyperconduit$reserveBadge(Font font, net.minecraft.network.chat.FormattedText text) {
+    private int hyperconduit$reserveBadge(Font font, FormattedText text) {
         return font.width(text) + 14;
     }
 
@@ -31,7 +36,9 @@ public abstract class ServerEntryMixin {
     private void hyperconduit$badge(GuiGraphics graphics, int index, int top, int left, int width, int height,
                                      int mouseX, int mouseY, boolean hovering, float partialTick, CallbackInfo ci) {
         ((DiscoveryOwner) screen).hyperconduit$discover(serverData);
-        Capability state = ((CapabilityEntry) serverData).hyperconduit$capability();
+        CapabilityDetails details = ((CapabilityEntry) serverData).hyperconduit$details();
+        Capability state = details.state();
+        // Badge stays immediately left of vanilla's signal and never covers the version text.
         int x = CapabilityIcon.left(left, width);
         graphics.fill(x, top, x + 12, top + 9, 0xCC182028);
         graphics.pose().pushPose();
@@ -40,9 +47,13 @@ public abstract class ServerEntryMixin {
         graphics.drawString(Minecraft.getInstance().font, "HC", 0, 0, CapabilityIcon.color(state), false);
         graphics.pose().popPose();
         if (CapabilityIcon.hovered(x, top, mouseX, mouseY)) {
-            screen.setTooltipForNextRenderPass(java.util.List.of(
-                    Component.literal(CapabilityIcon.description(state)).getVisualOrderText(),
-                    Component.literal("仅供发现；身份将在连接时验证").getVisualOrderText()));
+            List<FormattedCharSequence> tooltip = new ArrayList<>();
+            tooltip.add(Component.literal(CapabilityIcon.description(state)).getVisualOrderText());
+            for (String line : CapabilityIcon.details(details)) {
+                tooltip.add(Component.literal(line).getVisualOrderText());
+            }
+            tooltip.add(Component.literal("仅供发现；身份将在连接时验证").getVisualOrderText());
+            screen.setTooltipForNextRenderPass(tooltip);
         }
     }
 }

@@ -115,6 +115,34 @@ public final class ProbeFixture {
                 emitReady();
                 serve("badState", marker);
             }
+            case "missingCapability" -> {
+                emitReady();
+                serve("missingCapability", marker);
+            }
+            case "badCapabilityProtocol" -> {
+                emitReady();
+                serve("badCapabilityProtocol", marker);
+            }
+            case "duplicateCapabilityField" -> {
+                emitReady();
+                serve("duplicateCapabilityField", marker);
+            }
+            case "unknownCapabilityField" -> {
+                emitReady();
+                serve("unknownCapabilityField", marker);
+            }
+            case "nonBooleanCapability" -> {
+                emitReady();
+                serve("nonBooleanCapability", marker);
+            }
+            case "capabilityOnUnknown" -> {
+                emitReady();
+                serve("capabilityOnUnknown", marker);
+            }
+            case "capabilityWrongEnabled" -> {
+                emitReady();
+                serve("capabilityWrongEnabled", marker);
+            }
             case "duplicateResultField" -> {
                 emitReady();
                 serve("duplicateResultField", marker);
@@ -186,6 +214,26 @@ public final class ProbeFixture {
             String server = request.get("server").getAsString();
             switch (behavior) {
                 case "badState" -> emitResult(id, "bogus");
+                case "missingCapability" -> emitRaw("{\"version\":1,\"event\":\"result\",\"id\":"
+                        + id + ",\"state\":\"enabled\"}");
+                case "badCapabilityProtocol" -> emitRaw("{\"version\":1,\"event\":\"result\",\"id\":"
+                        + id + ",\"state\":\"enabled\",\"capability\":{\"protocol\":1,\"enabled\":true,"
+                        + "\"tcpAllowed\":true,\"disableBrutal\":false,\"tokenRequired\":true}}");
+                case "duplicateCapabilityField" -> emitRaw("{\"version\":1,\"event\":\"result\",\"id\":"
+                        + id + ",\"state\":\"enabled\",\"capability\":{\"protocol\":2,\"enabled\":true,"
+                        + "\"tcpAllowed\":true,\"tcpAllowed\":false,\"disableBrutal\":false,\"tokenRequired\":true}}");
+                case "unknownCapabilityField" -> emitRaw("{\"version\":1,\"event\":\"result\",\"id\":"
+                        + id + ",\"state\":\"enabled\",\"capability\":{\"protocol\":2,\"enabled\":true,"
+                        + "\"tcpAllowed\":true,\"disableBrutal\":false,\"tokenRequired\":true,\"token\":\"no\"}}");
+                case "nonBooleanCapability" -> emitRaw("{\"version\":1,\"event\":\"result\",\"id\":"
+                        + id + ",\"state\":\"enabled\",\"capability\":{\"protocol\":2,\"enabled\":true,"
+                        + "\"tcpAllowed\":1,\"disableBrutal\":false,\"tokenRequired\":true}}");
+                case "capabilityOnUnknown" -> emitRaw("{\"version\":1,\"event\":\"result\",\"id\":"
+                        + id + ",\"state\":\"unknown\",\"capability\":{\"protocol\":2,\"enabled\":true,"
+                        + "\"tcpAllowed\":true,\"disableBrutal\":false,\"tokenRequired\":true}}");
+                case "capabilityWrongEnabled" -> emitRaw("{\"version\":1,\"event\":\"result\",\"id\":"
+                        + id + ",\"state\":\"enabled\",\"capability\":{\"protocol\":2,\"enabled\":false,"
+                        + "\"tcpAllowed\":true,\"disableBrutal\":false,\"tokenRequired\":true}}");
                 case "duplicateResultField" -> emitRaw("{\"version\":1,\"event\":\"result\",\"id\":"
                         + id + ",\"state\":\"enabled\",\"state\":\"disabled\"}");
                 case "unknownResultField" -> emitRaw("{\"version\":1,\"event\":\"result\",\"id\":"
@@ -224,8 +272,15 @@ public final class ProbeFixture {
     }
 
     private static void emitResult(long id, String state) {
-        emit("{\"version\":1,\"event\":\"result\",\"id\":" + id
-                + ",\"state\":\"" + state + "\"}");
+        StringBuilder json = new StringBuilder("{\"version\":1,\"event\":\"result\",\"id\":")
+                .append(id).append(",\"state\":\"").append(state).append('"');
+        if ("enabled".equals(state) || "disabled".equals(state)) {
+            json.append(",\"capability\":{\"protocol\":2,\"enabled\":")
+                    .append("enabled".equals(state))
+                    .append(",\"tcpAllowed\":true,\"disableBrutal\":false,\"tokenRequired\":true}");
+        }
+        json.append('}');
+        emit(json.toString());
     }
 
     private static void emit(String json) {

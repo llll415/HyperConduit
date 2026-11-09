@@ -22,9 +22,9 @@ import (
 )
 
 const (
-	// StateEnabled means the server declares protocol 1 with enabled=true.
+	// StateEnabled means the server declares the current protocol with enabled=true.
 	StateEnabled = "enabled"
-	// StateDisabled means the server declares protocol 1 with enabled=false.
+	// StateDisabled means the server declares the current protocol with enabled=false.
 	StateDisabled = "disabled"
 	// StateUndeclared means the endpoint is absent (HTTP 404).
 	StateUndeclared = "undeclared"
@@ -34,9 +34,11 @@ const (
 	// StateIncompatible means the server declared a different protocol version.
 	StateIncompatible = "incompatible"
 
+	// Protocol is the current capability wire protocol.
+	Protocol = 2
+
 	capabilityHost = "hyperconduit"
 	capabilityPath = "/capability"
-	protocol       = 1
 
 	checkTimeout           = 3 * time.Second
 	maxResponseHeaderBytes = 4 << 10
@@ -44,10 +46,33 @@ const (
 	maxProtocol            = 999_999_999 // matches the Java-side [1-9][0-9]{0,8}
 )
 
+// Declaration is the exact five-field public capability object. It contains no
+// credentials; tokenRequired is a boolean, never the token itself.
+type Declaration struct {
+	Protocol      int  `json:"protocol"`
+	Enabled       bool `json:"enabled"`
+	TCPAllowed    bool `json:"tcpAllowed"`
+	DisableBrutal bool `json:"disableBrutal"`
+	TokenRequired bool `json:"tokenRequired"`
+}
+
+// NewDeclaration builds a current-protocol declaration.
+func NewDeclaration(enabled, tcpAllowed, disableBrutal, tokenRequired bool) Declaration {
+	return Declaration{
+		Protocol:      Protocol,
+		Enabled:       enabled,
+		TCPAllowed:    tcpAllowed,
+		DisableBrutal: disableBrutal,
+		TokenRequired: tokenRequired,
+	}
+}
+
 // Result is the only output of a capability check. State is one of the State*
-// constants above.
+// constants above. Capability is non-nil only for a valid compatible
+// declaration; incompatible and unknown results never carry policy.
 type Result struct {
-	State string
+	State      string
+	Capability *Declaration
 }
 
 // Check asks address (a literal IP:port supplied by the caller's resolver) for
@@ -115,17 +140,20 @@ func Check(ctx context.Context, address string) Result {
 	if err != nil || len(body) > maxBodyBytes {
 		return Result{State: StateUnknown}
 	}
-	declared, enabled, err := parseCapability(body)
+	declaration, err := parseCapability(body)
 	if err != nil {
 		return Result{State: StateUnknown}
 	}
-	if declared != protocol {
+	if declaration.Protocol != Protocol {
 		return Result{State: StateIncompatible}
 	}
-	if enabled {
-		return Result{State: StateEnabled}
+	state := StateDisabled
+	if declaration.Enabled {
+		state = StateEnabled
 	}
-	return Result{State: StateDisabled}
+	// Copy so the caller owns a stable value even if future code reuses buffers.
+	capability := declaration
+	return Result{State: state, Capability: &capability}
 }
 
 // probeDialer owns the UDP sockets and QUIC connections created for one Check.
@@ -209,75 +237,109 @@ func validateAddress(address string) (netip.AddrPort, error) {
 	return netip.AddrPortFrom(addr, uint16(p)), nil
 }
 
-// parseCapability enforces exactly two fields, no duplicate keys, no trailing
-// data, a positive integer protocol, and a boolean enabled value.
-func parseCapability(data []byte) (protocolVersion int, enabled bool, err error) {
+// parseCapability enforces no duplicate keys, no unknown keys, no trailing data,
+// a positive integer protocol, and boolean policy values. A different positive
+// protocol is returned without policy so the caller can report incompatible;
+// the current protocol requires exactly the five documented fields.
+func parseCapability(data []byte) (Declaration, error) {
 	dec := json.NewDecoder(bytes.NewReader(data))
 	dec.UseNumber()
 
 	tok, err := dec.Token()
 	if err != nil {
-		return 0, false, err
+		return Declaration{}, err
 	}
 	if delim, ok := tok.(json.Delim); !ok || delim != '{' {
-		return 0, false, errors.New("probe: capability is not an object")
+		return Declaration{}, errors.New("probe: capability is not an object")
 	}
 
-	seen := make(map[string]struct{}, 2)
-	var haveProtocol, haveEnabled bool
+	seen := make(map[string]struct{}, 5)
+	var declaration Declaration
+	var haveProtocol, haveEnabled, haveTCPAllowed, haveDisableBrutal, haveTokenRequired bool
 	for dec.More() {
 		keyToken, err := dec.Token()
 		if err != nil {
-			return 0, false, err
+			return Declaration{}, err
 		}
 		key, ok := keyToken.(string)
 		if !ok {
-			return 0, false, errors.New("probe: invalid capability key")
+			return Declaration{}, errors.New("probe: invalid capability key")
 		}
 		if _, duplicate := seen[key]; duplicate {
-			return 0, false, errors.New("probe: duplicate capability key")
+			return Declaration{}, errors.New("probe: duplicate capability key")
 		}
 		seen[key] = struct{}{}
 
 		var raw json.RawMessage
 		if err := dec.Decode(&raw); err != nil {
-			return 0, false, err
+			return Declaration{}, err
 		}
 		switch key {
 		case "protocol":
 			var value *int
 			if err := json.Unmarshal(raw, &value); err != nil || value == nil {
-				return 0, false, errors.New("probe: invalid protocol")
+				return Declaration{}, errors.New("probe: invalid protocol")
 			}
-			protocolVersion = *value
+			declaration.Protocol = *value
 			haveProtocol = true
 		case "enabled":
 			var value *bool
 			if err := json.Unmarshal(raw, &value); err != nil || value == nil {
-				return 0, false, errors.New("probe: invalid enabled")
+				return Declaration{}, errors.New("probe: invalid enabled")
 			}
-			enabled = *value
+			declaration.Enabled = *value
 			haveEnabled = true
+		case "tcpAllowed":
+			var value *bool
+			if err := json.Unmarshal(raw, &value); err != nil || value == nil {
+				return Declaration{}, errors.New("probe: invalid tcpAllowed")
+			}
+			declaration.TCPAllowed = *value
+			haveTCPAllowed = true
+		case "disableBrutal":
+			var value *bool
+			if err := json.Unmarshal(raw, &value); err != nil || value == nil {
+				return Declaration{}, errors.New("probe: invalid disableBrutal")
+			}
+			declaration.DisableBrutal = *value
+			haveDisableBrutal = true
+		case "tokenRequired":
+			var value *bool
+			if err := json.Unmarshal(raw, &value); err != nil || value == nil {
+				return Declaration{}, errors.New("probe: invalid tokenRequired")
+			}
+			declaration.TokenRequired = *value
+			haveTokenRequired = true
 		default:
-			return 0, false, errors.New("probe: unknown capability field")
+			return Declaration{}, errors.New("probe: unknown capability field")
 		}
 	}
 
 	tok, err = dec.Token()
 	if err != nil {
-		return 0, false, err
+		return Declaration{}, err
 	}
 	if delim, ok := tok.(json.Delim); !ok || delim != '}' {
-		return 0, false, errors.New("probe: invalid capability object")
+		return Declaration{}, errors.New("probe: invalid capability object")
 	}
 	if _, err := dec.Token(); err != io.EOF {
-		return 0, false, errors.New("probe: trailing capability data")
+		return Declaration{}, errors.New("probe: trailing capability data")
 	}
-	if !haveProtocol || !haveEnabled {
-		return 0, false, errors.New("probe: missing capability field")
+	if !haveProtocol {
+		return Declaration{}, errors.New("probe: missing capability field")
 	}
-	if protocolVersion < 1 || protocolVersion > maxProtocol {
-		return 0, false, errors.New("probe: protocol out of range")
+	if declaration.Protocol < 1 || declaration.Protocol > maxProtocol {
+		return Declaration{}, errors.New("probe: protocol out of range")
 	}
-	return protocolVersion, enabled, nil
+	if declaration.Protocol != Protocol {
+		// Old or future schema: only the protocol is meaningful.
+		return Declaration{Protocol: declaration.Protocol}, nil
+	}
+	if !haveEnabled || !haveTCPAllowed || !haveDisableBrutal || !haveTokenRequired {
+		return Declaration{}, errors.New("probe: missing capability field")
+	}
+	if len(seen) != 5 {
+		return Declaration{}, errors.New("probe: unknown capability field")
+	}
+	return declaration, nil
 }

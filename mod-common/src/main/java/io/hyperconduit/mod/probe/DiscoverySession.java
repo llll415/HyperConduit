@@ -25,7 +25,7 @@ public final class DiscoverySession implements AutoCloseable {
 
     public DiscoverySession() {
         batch = new ProbeBatch<>(4, 512, this::check, Minecraft.getInstance()::execute,
-                (server, result) -> ((CapabilityEntry) server).hyperconduit$probe(result));
+                (server, details) -> ((CapabilityEntry) server).hyperconduit$probeDetails(details));
     }
 
     public void submit(ServerData server) { batch.submit(server); }
@@ -47,10 +47,11 @@ public final class DiscoverySession implements AutoCloseable {
         });
     }
 
-    private CompletableFuture<Capability> check(ServerData server) {
+    private CompletableFuture<CapabilityDetails> check(ServerData server) {
         String endpoint = server.ip;
-        CompletableFuture<Capability> result = new CompletableFuture<>();
-        java.util.concurrent.atomic.AtomicReference<CompletableFuture<String>> request = new java.util.concurrent.atomic.AtomicReference<>();
+        CompletableFuture<CapabilityDetails> result = new CompletableFuture<>();
+        java.util.concurrent.atomic.AtomicReference<CompletableFuture<ProbeProcess.Details>> request =
+                new java.util.concurrent.atomic.AtomicReference<>();
         result.whenComplete((value, error) -> {
             var pending = request.get(); if (error != null && pending != null) pending.cancel(true);
         });
@@ -59,29 +60,37 @@ public final class DiscoverySession implements AutoCloseable {
                 RESOLVER.execute(() -> {
                     try {
                         if (result.isDone() || closed) return;
-                        Capability known = ((CapabilityEntry) server).hyperconduit$capability();
-                        if (known.declared()) { result.complete(known); return; }
+                        CapabilityDetails known = ((CapabilityEntry) server).hyperconduit$details();
+                        if (known.state().declared()) { result.complete(known); return; }
                         startProcess();
                         var address = ServerNameResolver.DEFAULT.resolveAddress(ServerAddress.parseString(endpoint))
                                 .map(ResolvedServerAddress::asInetSocketAddress);
                         // Resolver's original-login identity must never survive a discovery task.
                         address.ifPresent(ResolvedEndpoint::consume);
-                        if (address.isEmpty()) { result.complete(Capability.UNKNOWN); return; }
+                        if (address.isEmpty()) { result.complete(CapabilityDetails.UNKNOWN); return; }
                         process.whenComplete((child, failure) -> {
                             if (result.isDone()) return;
-                            if (failure != null) { result.complete(Capability.UNKNOWN); return; }
+                            if (failure != null) { result.complete(CapabilityDetails.UNKNOWN); return; }
                             try {
-                                var future = child.probe(address.get()); request.set(future);
+                                var future = child.probeDetails(address.get()); request.set(future);
                                 if (result.isDone()) future.cancel(true);
-                                future.whenComplete((state, error) -> result.complete(error == null
-                                        ? Capability.fromProbe(state) : Capability.UNKNOWN));
-                            } catch (RuntimeException failed) { result.complete(Capability.UNKNOWN); }
+                                future.whenComplete((details, error) -> result.complete(error == null
+                                        ? fromProbe(details)
+                                        : CapabilityDetails.UNKNOWN));
+                            } catch (RuntimeException failed) { result.complete(CapabilityDetails.UNKNOWN); }
                         });
-                    } catch (Exception failed) { result.complete(Capability.UNKNOWN); }
+                    } catch (Exception failed) { result.complete(CapabilityDetails.UNKNOWN); }
                 });
-            } catch (RejectedExecutionException full) { result.complete(Capability.UNKNOWN); }
+            } catch (RejectedExecutionException full) { result.complete(CapabilityDetails.UNKNOWN); }
         });
         return result.orTimeout(8, TimeUnit.SECONDS);
+    }
+
+    private static CapabilityDetails fromProbe(ProbeProcess.Details details) {
+        ProbeProcess.Declaration capability = details.capability();
+        if (capability == null) return CapabilityDetails.of(Capability.fromProbe(details.state()));
+        return CapabilityDetails.fromProbe(details.state(), capability.tcpAllowed(),
+                capability.disableBrutal(), capability.tokenRequired());
     }
 
     @Override public void close() {

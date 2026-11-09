@@ -55,11 +55,20 @@ type Config struct {
 	UpMbps           uint64 `json:"upMbps"`
 	DownMbps         uint64 `json:"downMbps"`
 	DisableBrutal    bool   `json:"disableBrutal"`
-	MaxConnections   int    `json:"maxConnections"`
-	MaxStreams       int64  `json:"maxStreams"`
-	ConnectTimeoutMS int    `json:"connectTimeoutMs"`
-	RequestTimeoutMS int    `json:"requestTimeoutMs"`
-	IdleTimeoutMS    int    `json:"idleTimeoutMs"`
+	// TCPAllowed is a server-only snapshot of whether the public Minecraft TCP
+	// listener is alive. The sidecar itself has no public TCP listener, so an
+	// independent CLI defaults this to false.
+	TCPAllowed       bool  `json:"tcpAllowed"`
+	MaxConnections   int   `json:"maxConnections"`
+	MaxStreams       int64 `json:"maxStreams"`
+	ConnectTimeoutMS int   `json:"connectTimeoutMs"`
+	RequestTimeoutMS int   `json:"requestTimeoutMs"`
+	IdleTimeoutMS    int   `json:"idleTimeoutMs"`
+
+	// tcpAllowedPresent records whether the on-disk JSON contained the server-only
+	// tcpAllowed key. Client mode rejects its presence even when the value is false,
+	// so a server-only field is never silently accepted by a client config.
+	tcpAllowedPresent bool
 }
 
 // Load reads a strict JSON configuration file, applies defaults, and validates
@@ -87,6 +96,14 @@ func Load(path, mode string) (Config, error) {
 	if err := dec.Decode(new(any)); err != io.EOF {
 		return Config{}, errors.New("config: trailing data after JSON value")
 	}
+	// Strict decoding above already rejected unknown/malformed keys. This second
+	// pass only records field presence so client mode can reject a server-only
+	// key even when its boolean value is false.
+	var present map[string]json.RawMessage
+	if err := json.Unmarshal(data, &present); err != nil {
+		return Config{}, describeJSONError(err)
+	}
+	_, cfg.tcpAllowedPresent = present["tcpAllowed"]
 
 	return cfg.Normalize(mode)
 }
@@ -172,6 +189,9 @@ func (c Config) normalizeClient() (Config, error) {
 	}
 	if c.DisableBrutal {
 		return Config{}, errors.New("disableBrutal: must be false in client mode")
+	}
+	if c.tcpAllowedPresent || c.TCPAllowed {
+		return Config{}, errors.New("tcpAllowed: only available in server mode")
 	}
 
 	return c, nil

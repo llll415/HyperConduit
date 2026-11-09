@@ -58,7 +58,7 @@ class ProbeInvariantTest {
         AtomicInteger active = new AtomicInteger();
         AtomicInteger peak = new AtomicInteger();
         List<String> checked = new ArrayList<>();
-        Map<String, Capability> results = new HashMap<>();
+        Map<String, CapabilityDetails> results = new HashMap<>();
 
         assertTimeoutPreemptively(Duration.ofSeconds(5), () -> {
             ProbeBatch<String> batch = new ProbeBatch<>(concurrency, keys.size(), key -> {
@@ -71,10 +71,10 @@ class ProbeInvariantTest {
                     throw new IllegalStateException("synchronous failure");
                 }
 
-                CompletableFuture<Capability> future = new CompletableFuture<>();
+                CompletableFuture<CapabilityDetails> future = new CompletableFuture<>();
                 future.whenComplete((value, error) -> active.decrementAndGet());
                 if (key.endsWith("9")) future.completeExceptionally(new IllegalStateException("asynchronous failure"));
-                else future.complete(Capability.ENABLED);
+                else future.complete(CapabilityDetails.of(Capability.ENABLED));
                 return future;
             }, Runnable::run, results::put);
 
@@ -87,7 +87,7 @@ class ProbeInvariantTest {
             for (String key : keys) {
                 Capability expected = key.endsWith("7") || key.endsWith("9")
                         ? Capability.UNKNOWN : Capability.ENABLED;
-                assertEquals(expected, results.get(key), key);
+                assertEquals(expected, results.get(key).state(), key);
             }
         });
     }
@@ -95,13 +95,13 @@ class ProbeInvariantTest {
     @Test
     void closingCancelsQueuedWorkWithoutStartingItAndIgnoresLateCallbacks() {
         List<String> checked = new ArrayList<>();
-        Map<String, CompletableFuture<Capability>> futures = new LinkedHashMap<>();
-        Map<String, Capability> published = new HashMap<>();
+        Map<String, CompletableFuture<CapabilityDetails>> futures = new LinkedHashMap<>();
+        Map<String, CapabilityDetails> published = new HashMap<>();
         ArrayDeque<Runnable> ownerTasks = new ArrayDeque<>();
 
         ProbeBatch<String> batch = new ProbeBatch<>(1, 4, key -> {
             checked.add(key);
-            var future = new CompletableFuture<Capability>();
+            var future = new CompletableFuture<CapabilityDetails>();
             futures.put(key, future);
             return future;
         }, ownerTasks::add, published::put);
@@ -110,7 +110,7 @@ class ProbeInvariantTest {
         batch.submit("queued");
         assertEquals(List.of("running"), checked);
         assertFalse(futures.containsKey("queued"), "queued key must not be checked while a slot is busy");
-        assertEquals(Capability.CHECKING, published.get("queued"));
+        assertEquals(Capability.CHECKING, published.get("queued").state());
 
         batch.close();
         assertEquals(List.of("running"), checked, "close must clear queued work without checking it");
@@ -118,19 +118,19 @@ class ProbeInvariantTest {
         assertFalse(futures.containsKey("queued"));
 
         while (!ownerTasks.isEmpty()) ownerTasks.removeFirst().run();
-        assertEquals(Capability.CHECKING, published.get("running"), "late callback after close must be ignored");
-        assertEquals(Capability.CHECKING, published.get("queued"), "cancelled queue must never publish a result");
+        assertEquals(Capability.CHECKING, published.get("running").state(), "late callback after close must be ignored");
+        assertEquals(Capability.CHECKING, published.get("queued").state(), "cancelled queue must never publish a result");
     }
 
     @Test
     void duplicateAndOverflowKeysStayBoundedAndUnchecked() {
         List<String> checked = new ArrayList<>();
-        Map<String, CompletableFuture<Capability>> futures = new LinkedHashMap<>();
-        Map<String, Capability> results = new HashMap<>();
+        Map<String, CompletableFuture<CapabilityDetails>> futures = new LinkedHashMap<>();
+        Map<String, CapabilityDetails> results = new HashMap<>();
 
         ProbeBatch<String> batch = new ProbeBatch<>(1, 2, key -> {
             checked.add(key);
-            var future = new CompletableFuture<Capability>();
+            var future = new CompletableFuture<CapabilityDetails>();
             futures.put(key, future);
             return future;
         }, Runnable::run, results::put);
@@ -141,16 +141,16 @@ class ProbeInvariantTest {
         batch.submit("overflow");
 
         assertEquals(List.of("first"), checked, "duplicate and overflow keys must not start checks");
-        assertEquals(Capability.UNKNOWN, results.get("overflow"));
+        assertEquals(Capability.UNKNOWN, results.get("overflow").state());
         assertFalse(futures.containsKey("overflow"));
-        assertEquals(Capability.CHECKING, results.get("second"));
+        assertEquals(Capability.CHECKING, results.get("second").state());
 
-        futures.get("first").complete(Capability.DISABLED);
+        futures.get("first").complete(CapabilityDetails.of(Capability.DISABLED));
         assertEquals(List.of("first", "second"), checked);
-        assertEquals(Capability.DISABLED, results.get("first"));
+        assertEquals(Capability.DISABLED, results.get("first").state());
 
         batch.submit("after-full");
-        assertEquals(Capability.UNKNOWN, results.get("after-full"));
+        assertEquals(Capability.UNKNOWN, results.get("after-full").state());
         assertFalse(futures.containsKey("after-full"));
         batch.close();
     }

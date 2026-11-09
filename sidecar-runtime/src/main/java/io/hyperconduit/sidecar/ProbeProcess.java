@@ -46,15 +46,18 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * parent -> child  {"version":1,"command":"probe","id":1,"server":"127.0.0.1:443"}
  * parent -> child  {"version":1,"command":"cancel","id":1}
  * parent -> child  {"version":1,"command":"shutdown"}
- * child -> parent  {"version":1,"event":"result","id":1,"state":"enabled"}
+ * child -> parent  {"version":1,"event":"result","id":1,"state":"enabled",
+ *                   "capability":{"protocol":2,"enabled":true,"tcpAllowed":true,
+ *                                 "disableBrutal":false,"tokenRequired":true}}
  * </pre>
  *
  * <p>{@link #probe(InetSocketAddress)} completes with exactly one of {@code enabled},
- * {@code disabled}, {@code undeclared}, {@code unknown} or {@code incompatible}. Readiness and
- * probes are bounded to five seconds; a timed-out probe completes with {@code unknown} and is
- * cancelled on the wire. Output is strict: lines are at most 4096 bytes, duplicate/unknown fields
- * are rejected, and a result is accepted only after a successful {@code ready}. stderr is drained
- * and never retained.
+ * {@code disabled}, {@code undeclared}, {@code unknown} or {@code incompatible};
+ * {@link #probeDetails(InetSocketAddress)} additionally carries the exact five-field capability
+ * object, and only for a valid compatible declaration. Readiness and probes are bounded to five
+ * seconds; a timed-out probe completes with {@code unknown} and is cancelled on the wire. Output
+ * is strict: lines are at most 4096 bytes, duplicate/unknown fields are rejected, and a result is
+ * accepted only after a successful {@code ready}. stderr is drained and never retained.
  *
  * <p>All worker threads are daemon threads. {@link #close()} is bounded, sends {@code shutdown},
  * then escalates to destroy; do not call it from a render thread. The child also exits on stdin
@@ -68,7 +71,32 @@ public final class ProbeProcess implements AutoCloseable {
     public static final Set<String> STATES = Set.of(
             "enabled", "disabled", "undeclared", "unknown", "incompatible");
 
+    /** Capability wire protocol carried inside {@link Declaration}. */
+    public static final int CAPABILITY_PROTOCOL = 2;
+
     private static final int PROTOCOL_VERSION = 1;
+
+    /**
+     * One probe result. {@code capability} is non-null only for a valid compatible declaration;
+     * unknown, undeclared, incompatible and timeout results carry no policy at all.
+     */
+    public record Details(String state, Declaration capability) {
+        public static Details state(String state) {
+            return new Details(state, null);
+        }
+
+        public boolean declared() {
+            return capability != null;
+        }
+    }
+
+    /** Public capability object; it contains no credentials or token material. */
+    public record Declaration(int protocol, boolean enabled, boolean tcpAllowed,
+                              boolean disableBrutal, boolean tokenRequired) {
+        public boolean compatible() {
+            return protocol == CAPABILITY_PROTOCOL;
+        }
+    }
     private static final int MAX_PENDING = 32;
     private static final int MAX_LINE_BYTES = 4096;
     private static final int WRITE_QUEUE_CAPACITY = 64;
@@ -213,6 +241,25 @@ public final class ProbeProcess implements AutoCloseable {
      *               performed here
      */
     public CompletableFuture<String> probe(InetSocketAddress server) {
+        CompletableFuture<Details> details = probeDetails(server);
+        CompletableFuture<String> state = new CompletableFuture<>();
+        details.whenComplete((value, error) -> {
+            if (error != null) state.completeExceptionally(error);
+            else state.complete(value.state());
+        });
+        // Cancelling the compatibility wrapper must cancel the actual pending wire request.
+        state.whenComplete((value, error) -> {
+            if (state.isCancelled()) details.cancel(true);
+        });
+        return state;
+    }
+
+    /**
+     * Queues one capability probe and returns the structured declaration. The returned future
+     * fails with the same codes as {@link #probe(InetSocketAddress)}; cancelling it sends a wire
+     * cancel for a request that was already written.
+     */
+    public CompletableFuture<Details> probeDetails(InetSocketAddress server) {
         Objects.requireNonNull(server, "server");
         InetAddress address = server.getAddress();
         if (address == null) throw new IllegalArgumentException("Probe server must be resolved");
@@ -229,7 +276,7 @@ public final class ProbeProcess implements AutoCloseable {
             pending.put(id, request);
         }
 
-        CompletableFuture<String> result = request.result;
+        CompletableFuture<Details> result = request.result;
         result.whenComplete((value, error) -> {
             if (result.isCancelled()) cancel(request.id);
         });
@@ -281,8 +328,8 @@ public final class ProbeProcess implements AutoCloseable {
         return request + "\n";
     }
 
-    private static CompletableFuture<String> failedFuture(String code) {
-        CompletableFuture<String> future = new CompletableFuture<>();
+    private static <T> CompletableFuture<T> failedFuture(String code) {
+        CompletableFuture<T> future = new CompletableFuture<>();
         future.completeExceptionally(new SidecarException(code));
         return future;
     }
@@ -336,7 +383,7 @@ public final class ProbeProcess implements AutoCloseable {
             sent = request.sent;
         }
         cancelTimer(request);
-        request.result.complete("unknown");
+        request.result.complete(Details.state("unknown"));
         if (sent) enqueueControl(cancelLine(id));
     }
 
@@ -354,7 +401,7 @@ public final class ProbeProcess implements AutoCloseable {
         if (sent) enqueueControl(cancelLine(id));
     }
 
-    private void complete(long id, String state) {
+    private void complete(long id, Details details) {
         Pending request = removePending(id);
         if (request == null) return; // Late result after timeout/cancel is ignored.
         synchronized (request) {
@@ -362,7 +409,7 @@ public final class ProbeProcess implements AutoCloseable {
             request.done = true;
         }
         cancelTimer(request);
-        request.result.complete(state);
+        request.result.complete(details);
     }
 
     private void finishFailure(Pending request, SidecarException error) {
@@ -505,6 +552,7 @@ public final class ProbeProcess implements AutoCloseable {
             String type = null;
             Long id = null;
             String state = null;
+            Declaration capability = null;
 
             reader.beginObject();
             while (reader.hasNext()) {
@@ -515,6 +563,7 @@ public final class ProbeProcess implements AutoCloseable {
                     case "event" -> type = readString(reader);
                     case "id" -> id = readId(reader);
                     case "state" -> state = readString(reader);
+                    case "capability" -> capability = readCapability(reader);
                     default -> throw new IOException("Unknown protocol field");
                 }
             }
@@ -529,7 +578,9 @@ public final class ProbeProcess implements AutoCloseable {
             if (type == null) throw new IOException("Missing protocol event");
 
             if ("ready".equals(type)) {
-                if (id != null || state != null) throw new IOException("Unexpected ready field");
+                if (id != null || state != null || capability != null) {
+                    throw new IOException("Unexpected ready field");
+                }
                 if (ready.isDone()) {
                     if (!stopping.get()) fail("protocol_duplicate_ready");
                     return;
@@ -548,7 +599,24 @@ public final class ProbeProcess implements AutoCloseable {
                     fail("protocol_state");
                     return;
                 }
-                complete(id, state);
+                boolean declared = "enabled".equals(state) || "disabled".equals(state);
+                if (declared) {
+                    // A valid declaration must carry the complete capability object, and its
+                    // enabled flag must agree with the state.
+                    if (capability == null
+                            || !capability.compatible()
+                            || capability.enabled() != "enabled".equals(state)) {
+                        fail("protocol_capability");
+                        return;
+                    }
+                    complete(id, new Details(state, capability));
+                } else {
+                    if (capability != null) {
+                        fail("protocol_capability");
+                        return;
+                    }
+                    complete(id, Details.state(state));
+                }
             } else {
                 fail("protocol_event");
             }
@@ -580,6 +648,58 @@ public final class ProbeProcess implements AutoCloseable {
     private static String readString(JsonReader reader) throws IOException {
         if (reader.peek() != JsonToken.STRING) throw new IOException("Expected a string");
         return reader.nextString();
+    }
+
+    /** Strictly reads the exact five-field capability object; no token or unknown fields. */
+    private static Declaration readCapability(JsonReader reader) throws IOException {
+        if (reader.peek() != JsonToken.BEGIN_OBJECT) {
+            throw new IOException("Capability must be an object");
+        }
+        reader.beginObject();
+        Set<String> seen = new HashSet<>(5);
+        Integer protocol = null;
+        Boolean enabled = null;
+        Boolean tcpAllowed = null;
+        Boolean disableBrutal = null;
+        Boolean tokenRequired = null;
+        while (reader.hasNext()) {
+            String name = reader.nextName();
+            if (!seen.add(name)) throw new IOException("Duplicate capability field");
+            switch (name) {
+                case "protocol" -> {
+                    if (reader.peek() != JsonToken.NUMBER) throw new IOException("Invalid capability protocol");
+                    String raw = reader.nextString();
+                    if (!raw.matches("[1-9][0-9]{0,8}")) throw new IOException("Invalid capability protocol");
+                    protocol = Integer.parseInt(raw);
+                }
+                case "enabled" -> {
+                    if (reader.peek() != JsonToken.BOOLEAN) throw new IOException("Invalid capability enabled");
+                    enabled = reader.nextBoolean();
+                }
+                case "tcpAllowed" -> {
+                    if (reader.peek() != JsonToken.BOOLEAN) throw new IOException("Invalid capability tcpAllowed");
+                    tcpAllowed = reader.nextBoolean();
+                }
+                case "disableBrutal" -> {
+                    if (reader.peek() != JsonToken.BOOLEAN) throw new IOException("Invalid capability disableBrutal");
+                    disableBrutal = reader.nextBoolean();
+                }
+                case "tokenRequired" -> {
+                    if (reader.peek() != JsonToken.BOOLEAN) throw new IOException("Invalid capability tokenRequired");
+                    tokenRequired = reader.nextBoolean();
+                }
+                default -> throw new IOException("Unknown capability field");
+            }
+        }
+        reader.endObject();
+        if (protocol == null || protocol != CAPABILITY_PROTOCOL) {
+            throw new IOException("Unsupported capability protocol");
+        }
+        if (seen.size() != 5 || enabled == null || tcpAllowed == null
+                || disableBrutal == null || tokenRequired == null) {
+            throw new IOException("Missing capability field");
+        }
+        return new Declaration(protocol, enabled, tcpAllowed, disableBrutal, tokenRequired);
     }
 
     private void watchExit() {
@@ -724,7 +844,7 @@ public final class ProbeProcess implements AutoCloseable {
 
     private static final class Pending {
         private final long id;
-        private final CompletableFuture<String> result = new CompletableFuture<>();
+        private final CompletableFuture<Details> result = new CompletableFuture<>();
         private boolean sent; // Guarded by this.
         private boolean done; // Guarded by this.
         private volatile ScheduledFuture<?> timeout;

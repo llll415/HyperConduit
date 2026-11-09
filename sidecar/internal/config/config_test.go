@@ -163,6 +163,7 @@ func TestNormalizeClientInvalid(t *testing.T) {
 		{name: "cert file set", cfg: with(valid, func(c *Config) { c.CertFile = "cert.pem" }), wantField: "certFile"},
 		{name: "key file set", cfg: with(valid, func(c *Config) { c.KeyFile = "key.pem" }), wantField: "keyFile"},
 		{name: "disable brutal set", cfg: with(valid, func(c *Config) { c.DisableBrutal = true }), wantField: "disableBrutal"},
+		{name: "tcp allowed set", cfg: with(valid, func(c *Config) { c.TCPAllowed = true }), wantField: "tcpAllowed"},
 
 		{name: "congestion paced", cfg: with(valid, func(c *Config) { c.Congestion = "paced" }), wantField: "congestion"},
 		{name: "congestion uppercase", cfg: with(valid, func(c *Config) { c.Congestion = "BBR" }), wantField: "congestion"},
@@ -233,6 +234,7 @@ func TestNormalizeServerValid(t *testing.T) {
 				c.UpMbps = 1_000_000
 				c.DownMbps = 1_000_000
 				c.DisableBrutal = true
+				c.TCPAllowed = true
 				c.MaxConnections = 1
 				c.MaxStreams = 1024
 				c.ConnectTimeoutMS = 100
@@ -306,6 +308,7 @@ func TestLoadValid(t *testing.T) {
 		"upMbps": 100,
 		"downMbps": 50,
 		"disableBrutal": true,
+		"tcpAllowed": true,
 		"maxConnections": 128,
 		"maxStreams": 64,
 		"connectTimeoutMs": 1000,
@@ -327,14 +330,24 @@ func TestLoadValid(t *testing.T) {
 	if got.Congestion != "reno" || got.UpMbps != 100 || got.DownMbps != 50 {
 		t.Errorf("congestion/bandwidth = %q/%d/%d", got.Congestion, got.UpMbps, got.DownMbps)
 	}
-	if !got.DisableBrutal || got.MaxConnections != 128 || got.MaxStreams != 64 {
-		t.Errorf("limits = %t/%d/%d", got.DisableBrutal, got.MaxConnections, got.MaxStreams)
+	if !got.DisableBrutal || !got.TCPAllowed || got.MaxConnections != 128 || got.MaxStreams != 64 {
+		t.Errorf("limits = %t/%t/%d/%d", got.DisableBrutal, got.TCPAllowed, got.MaxConnections, got.MaxStreams)
 	}
 	if got.ConnectTimeoutMS != 1000 || got.RequestTimeoutMS != 2000 || got.IdleTimeoutMS != 60000 {
 		t.Errorf("timeouts = %d/%d/%d", got.ConnectTimeoutMS, got.RequestTimeoutMS, got.IdleTimeoutMS)
 	}
 	if got.Token != "abc" {
 		t.Errorf("Token = %q, want abc", got.Token)
+	}
+}
+
+func TestLoadClientRejectsPresentTcpAllowedEvenFalse(t *testing.T) {
+	_, err := Load(writeConfigFile(t, `{"server":"example.com:443","tcpAllowed":false}`), ModeClient)
+	if err == nil {
+		t.Fatal("client config accepted the server-only tcpAllowed key")
+	}
+	if !strings.Contains(err.Error(), "tcpAllowed") {
+		t.Fatalf("error %q does not mention tcpAllowed", err)
 	}
 }
 
