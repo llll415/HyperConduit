@@ -84,7 +84,6 @@ public final class HyperConduitClientEvents {
         List<String> lines = new ArrayList<>();
         lines.add("§b[HyperConduit]§r §a[隧道已连接]§r");
         lines.add("§f[传输]§r " + TelemetryText.describe(TunnelMetrics.connection(connection.channel())));
-        lines.add("§7速率含 QUIC 重传与协议开销，非游戏有效载荷§r");
         return lines;
     }
 

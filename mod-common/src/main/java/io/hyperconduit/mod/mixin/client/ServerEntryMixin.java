@@ -52,7 +52,6 @@ public abstract class ServerEntryMixin {
             for (String line : CapabilityIcon.details(details)) {
                 tooltip.add(Component.literal(line).getVisualOrderText());
             }
-            tooltip.add(Component.literal("仅供发现；身份将在连接时验证").getVisualOrderText());
             screen.setTooltipForNextRenderPass(tooltip);
         }
     }

@@ -89,7 +89,7 @@ public final class HyperConduitServerEvents {
     public static List<String> statusLines(MinecraftServer server) {
         HyperConduitConfig config = ConfigHolder.get();
         List<String> lines = new ArrayList<>();
-        lines.add("[HyperConduit] 服务端配置（下次监听应用） | " + configStatus(config));
+        lines.add("[HyperConduit] 服务端配置 | " + configStatus(config));
         if (server == null) return lines;
 
         int tunnels = 0, vanilla = 0, local = 0;
@@ -111,7 +111,6 @@ public final class HyperConduitServerEvents {
                     + TelemetryText.describe(TunnelMetrics.connection(channel)));
         }
         lines.add("[HyperConduit] 总计 | 隧道 " + tunnels + " | 原版TCP " + vanilla + " | 本地 " + local);
-        if (tunnels > 0) lines.add("[HyperConduit] 速率为本端 QUIC 连接统计，含协议开销与重传；共享连接不代表逐玩家有效载荷。");
         return lines;
     }
 
