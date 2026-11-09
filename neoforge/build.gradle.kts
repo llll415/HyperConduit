@@ -17,6 +17,8 @@ dependencies {
     compileOnly("org.spongepowered:mixin:0.8.7")
 
     testImplementation(project(":core"))
+    // Test-only: inspect the compiled command path without loading Minecraft classes.
+    testImplementation("org.ow2.asm:asm:9.7.1")
 }
 
 neoForge {
@@ -26,6 +28,9 @@ neoForge {
         minecraftVersion = "1.21.1"
         mappingsVersion = "2024.11.17"
     }
+
+    // Test-only: let unit tests compile against the same Minecraft/NeoForge classes as main.
+    addModdingDependenciesTo(sourceSets.named("test").get())
 
     runs {
         create("server") {

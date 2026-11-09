@@ -5,6 +5,9 @@ import io.hyperconduit.mod.config.ConfigHolder;
 import io.hyperconduit.mod.config.HyperConduitConfig;
 import io.hyperconduit.mod.bridge.TunnelMetrics;
 import io.hyperconduit.mod.bridge.TelemetryText;
+import io.hyperconduit.neoforge.watch.CommandWatchKeys;
+import io.hyperconduit.neoforge.watch.WatchKey;
+import io.hyperconduit.neoforge.watch.WatchRegistry;
 import io.hyperconduit.sidecar.TunnelAttributes;
 import io.netty.channel.Channel;
 import io.netty.channel.local.LocalChannel;
@@ -22,13 +25,12 @@ import net.neoforged.fml.common.EventBusSubscriber;
 import java.net.InetSocketAddress;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Set;
-import java.util.concurrent.ConcurrentHashMap;
+import java.util.Map;
 
 @EventBusSubscriber(modid = "hyperconduit")
 public final class HyperConduitServerEvents {
 
-    private static final Set<CommandSourceStack> WATCHERS = ConcurrentHashMap.newKeySet();
+    private static final WatchRegistry<WatchKey, CommandSourceStack> WATCHERS = new WatchRegistry<>();
     private static int watchTicks;
 
     private HyperConduitServerEvents() {
@@ -48,26 +50,32 @@ public final class HyperConduitServerEvents {
                 .then(Commands.literal("status").executes(context -> sendStatus(context.getSource().getServer(),
                         context.getSource())))
                 .then(Commands.literal("watch").executes(context -> {
-                    WATCHERS.add(context.getSource());
-                    context.getSource().sendSuccess(() -> Component.literal(
+                    CommandSourceStack source = context.getSource();
+                    WATCHERS.put(CommandWatchKeys.of(source), source);
+                    source.sendSuccess(() -> Component.literal(
                             "[HyperConduit] 已开始每秒输出实时状态；使用 /hyperconduit watch stop 停止。"), false);
                     return Command.SINGLE_SUCCESS;
                 }).then(Commands.literal("stop").executes(context -> {
-                    WATCHERS.remove(context.getSource());
-                    context.getSource().sendSuccess(() -> Component.literal("[HyperConduit] 已停止实时状态输出。"), false);
+                    CommandSourceStack source = context.getSource();
+                    WATCHERS.remove(CommandWatchKeys.of(source));
+                    source.sendSuccess(() -> Component.literal("[HyperConduit] 已停止实时状态输出。"), false);
                     return Command.SINGLE_SUCCESS;
                 }))));
     }
 
     @SubscribeEvent
     public static void updateWatchers(ServerTickEvent.Post event) {
-        WATCHERS.removeIf(source -> source.getPlayer() != null
-                && (!source.getPlayer().connection.isAcceptingMessages() || !source.hasPermission(2)));
-        if (++watchTicks < 20 || WATCHERS.isEmpty()) return;
+        WATCHERS.removeIf(CommandWatchKeys::shouldDrop);
+        if (WATCHERS.isEmpty()) {
+            watchTicks = 0;
+            return;
+        }
+        if (++watchTicks < 20) return;
         watchTicks = 0;
         List<String> lines = statusLines(event.getServer());
-        for (CommandSourceStack watcher : WATCHERS) {
-            for (String line : lines) watcher.sendSuccess(() -> Component.literal(line), false);
+        for (Map.Entry<WatchKey, CommandSourceStack> watcher : WATCHERS.snapshot()) {
+            CommandSourceStack source = watcher.getValue();
+            for (String line : lines) source.sendSuccess(() -> Component.literal(line), false);
         }
     }
 
