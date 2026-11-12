@@ -15,6 +15,23 @@ scratch/
 bin/
 
 run/
+run-server/
 logs/
 *.log
 *.hprof
+
+# Local development notes and scratch files (kept on disk, not published).
+/HY2CORE_HANDOFF.md
+/HY2CORE_PLAN.md
+/docs/
+/.opencode/
+/opencode/
+*.tmp
+*.temp
+*.bak
+*.orig
+*.rej
+*~
+.DS_Store
+Thumbs.db
+Desktop.ini

@@ -228,3 +228,7 @@ HyperConduit 没有将下列项目作为运行时库引入，也不与其协议�
 - [quic-go](https://github.com/HyNetworks/quic-go)
   - 参考其 QUIC 传输层的参数与可靠性设计：初始数据报尺寸、ACK 区间表示、平滑 RTT / ACK delay 处理、基于包号及时间阈值的丢包检测、PTO 探测与 Pacer 行为；
   - HyperConduit 使用自定义 packet、frame 与握手格式实现这些机制，只保留 Minecraft 所需的单有序字节流；不实现 RFC 9000 wire format、多流复用、HTTP/3 或标准 QUIC 互操作。
+
+## 许可证
+
+本项目以 **MIT** 许可证发布，全文见仓库根目录的 `LICENSE`。上面列出的参考项目仅作为设计与算法来源，本项目以自己的 Java 实现完成，没有把它们作为运行时依赖引入。
