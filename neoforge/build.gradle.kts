@@ -73,10 +73,10 @@ tasks.withType<org.gradle.jvm.tasks.Jar>().matching { it.name == "jar" }.configu
     from({
         zipTree(project(":sidecar-runtime").tasks.named("jar").get().outputs.files.singleFile)
     })
+    from(rootProject.file("LICENSE")) { into("META-INF") }
 
     duplicatesStrategy = DuplicatesStrategy.EXCLUDE
 }
-
 val verifyDistribution by tasks.registering {
     group = "verification"
     description = "Checks platform binaries, manifests and notices in the final NeoForge jar."
@@ -120,6 +120,7 @@ val verifyDistribution by tasks.registering {
             for (notice in listOf("GO-LICENSE", "HY2-LICENSE.md", "THIRD_PARTY_NOTICES.md")) {
                 check(zip.getEntry("META-INF/hyperconduit-sidecar/$notice") != null) { "Missing bundled notice: $notice" }
             }
+            check(zip.getEntry("META-INF/LICENSE") != null) { "Missing project LICENSE" }
         }
     }
 }

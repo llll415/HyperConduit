@@ -358,4 +358,4 @@ HyperConduit 基于下列开源项目构建或衍生（致谢只说明代码来�
 - **[Go 标准库与 `golang.org/x/*`](https://go.dev/)**（BSD-3-Clause License），以及传递依赖 **[`quic-go/qpack`](https://github.com/quic-go/qpack)**、**[`refraction-networking/utls`](https://github.com/refraction-networking/utls)**（由 `apernet/quic-go` 的 TLS 握手引入）、**[`klauspost/compress`](https://github.com/klauspost/compress)**、**[`andybalholm/brotli`](https://github.com/andybalholm/brotli)**。
 - **[NeoForge](https://neoforged.net/)**、**[ModDevGradle](https://github.com/neoforged/ModDevGradle)**、**[SpongePowered Mixin](https://github.com/SpongePowered/Mixin)**、**[ParchmentMC](https://parchmentmc.org/)**、**[Netty](https://netty.io/)**、**[Google Gson](https://github.com/google/gson)**，以及测试工具 **[JUnit 5](https://junit.org/junit5/)**、**[OW2 ASM](https://asm.ow2.io/)**、**[`stretchr/testify`](https://github.com/stretchr/testify)**、**[`uber-go/goleak`](https://github.com/uber-go/goleak)**。
 
-本 Mod 的元数据声明为 **MIT**；内置的上游源码和第三方依赖各自遵循其原有许可证。第三方声明与许可原文随包保存在 jar 内的 `META-INF/hyperconduit-sidecar/`。
+本项目以 **MIT** 许可证发布，全文见仓库根目录的 `LICENSE`。内置的 Hysteria 2 core、`apernet/quic-go` 等上游源码与第三方依赖各自遵循其原有许可证，原文随包保存在 jar 内的 `META-INF/hyperconduit-sidecar/`。
