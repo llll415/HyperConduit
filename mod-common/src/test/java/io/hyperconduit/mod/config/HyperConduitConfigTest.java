@@ -45,7 +45,7 @@ class HyperConduitConfigTest {
         assertEquals(64, config.maxConnections);
         assertFalse(config.proxyProtocolV2);
         assertNotNull(config.proxyProtocolTrustedSources);
-        assertTrue(config.proxyProtocolTrustedSources.isEmpty());
+        assertEquals(List.of("127.0.0.1/32", "::1/128"), config.proxyProtocolTrustedSources);
     }
 
     @Test
@@ -73,7 +73,7 @@ class HyperConduitConfigTest {
         assertEquals(5000, config.connectTimeoutMs);
         assertEquals(64, config.maxConnections);
         assertFalse(config.proxyProtocolV2);
-        assertTrue(config.proxyProtocolTrustedSources.isEmpty());
+        assertEquals(List.of("127.0.0.1/32", "::1/128"), config.proxyProtocolTrustedSources);
     }
 
     @Test
@@ -305,6 +305,7 @@ class HyperConduitConfigTest {
     @Test
     void requiresAtLeastOneSourceWhenProxyProtocolIsEnabled() {
         HyperConduitConfig config = new HyperConduitConfig();
+        config.proxyProtocolTrustedSources = List.of();
         config.proxyProtocolV2 = true;
         assertInvalid(config);
 
@@ -359,6 +360,7 @@ class HyperConduitConfigTest {
     @Test
     void acceptsAtMost128ProxyProtocolSources() {
         HyperConduitConfig config = new HyperConduitConfig();
+        config.proxyProtocolTrustedSources = new java.util.ArrayList<>();
         for (int i = 0; i < 128; i++) {
             config.proxyProtocolTrustedSources.add("10.0." + (i / 256) + "." + (i % 256));
         }

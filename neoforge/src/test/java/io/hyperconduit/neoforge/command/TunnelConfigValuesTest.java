@@ -132,6 +132,7 @@ class TunnelConfigValuesTest {
     @Test
     void enablingProxyProtocolRequiresTrustedSources() {
         HyperConduitConfig config = new HyperConduitConfig();
+        config.proxyProtocolTrustedSources = List.of();
 
         TunnelCommandException failure = assertThrows(TunnelCommandException.class,
                 () -> TunnelConfigValues.apply(config, TunnelConfigKey.PROXY_PROTOCOL_V2, "true"));

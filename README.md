@@ -138,7 +138,7 @@ Brutal 的“目标速率”是协商后的基础值，丢包补偿可能让实�
   "connectTimeoutMs": 5000,
   "maxConnections": 64,
   "proxyProtocolV2": false,
-  "proxyProtocolTrustedSources": []
+  "proxyProtocolTrustedSources": ["127.0.0.1/32", "::1/128"]
 }
 ```
 

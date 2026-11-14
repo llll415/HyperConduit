@@ -103,7 +103,7 @@ public final class HyperConduitConfig {
      * and IPv6 zone identifiers are never accepted or resolved. Empty means no source is trusted;
      * at most 128 entries are allowed.
      */
-    public List<String> proxyProtocolTrustedSources = new ArrayList<>();
+    public List<String> proxyProtocolTrustedSources = new ArrayList<>(List.of("127.0.0.1/32", "::1/128"));
 
     /** Returns an independent copy of this configuration, including token values. */
     public HyperConduitConfig copy() {
