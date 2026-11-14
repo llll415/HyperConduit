@@ -32,7 +32,39 @@
 - 它不是通用代理，也不会绕过原版的登录与验证。
 - 它**不保证**改善网络。UDP 被限速或封锁的线路上，它可能更差，甚至连不上；隧道失败时**不会**自动改走 TCP。
 
-当前只支持 NeoForge，Fabric 尚未实现。
+客户端目前只支持 NeoForge，Fabric 尚未实现。`feature/velocity` 分支另提供开发中的 Velocity 服务端插件，见下文；它不替代客户端 Mod。
+
+### Velocity 插件（开发中）
+
+Velocity 适配复用现有隧道程序，链路为：
+
+```text
+NeoForge HC 客户端 → QUIC → HC 隧道程序 → TCP + Proxy Protocol v2 → Velocity → 后端服
+```
+
+- 插件通过 Velocity 公开 API 获取游戏监听地址和端口，UDP 使用相同的绑定地址和端口号；TCP 转发目标直接指向 Velocity，通配监听地址转换为对应的本机回环地址。不修改 Velocity 原生 TCP 网络、登录、认证或切服逻辑。
+- 管理员需要在 `velocity.toml` 中启用 `[advanced]` 下的 `haproxy-protocol = true`，并自行配置后端 modern forwarding。插件不会自动修改 Velocity 配置。
+- **Proxy Protocol v2 不是认证协议。** 必须通过监听地址、防火墙或安全组保护 Velocity TCP 入口，只允许可信转发端访问，否则可能被伪造玩家来源 IP。启用该功能的监听不能被当作普通 Minecraft TCP 入口直接使用。
+- `disableVanillaTcp` 在 Velocity 上**不适用、没有作用**；插件不会关闭 Velocity TCP 监听，也不宣称强制实现“仅隧道”。
+- 前置 FRP 的 UDP Proxy Protocol v2 输入直接复用 v1.1.0 实现，默认关闭；它与向 Velocity 发送的 TCP Proxy Protocol v2 输出是两个独立方向。
+- Velocity 没有配置 GUI，使用配置文件、控制台和管理员命令管理。持久身份和受保护的临时启动配置由现有运行时管理。
+- Velocity 公开的服务器列表 API 不提供任意根 JSON 字段扩展，因此暂不附加 NeoForge 主线的 TCP 状态 JSON 能力声明；继续使用已有 UDP 能力探测，不注入 Velocity 私有网络实现。客户端隧道指标仍来自客户端自己的隧道进程。
+
+此适配尚未完成实际 Velocity 进服、认证、切服及 FRP 链路验收，不能将主线的 NeoForge 测试结果视作 Velocity 已验证。
+
+构建使用 `./gradlew :velocity:check`，插件产物为 `velocity/build/libs/hyperconduit-velocity-1.1.0.jar`，放入 Velocity 的 `plugins/`。需要 Java 21，编译目标为 Velocity API 3.4.0；其他版本尚未验证。插件默认不启用：创建或编辑 `plugins/hyperconduit/config.json`，填入 `{"enabled":true}`，同时按上述要求开启 Velocity 的协议头接收，再重启代理。向 Velocity 的协议头输出默认开启；FRP 输入仍默认关闭。配置文件不存在时读取默认值，命令首次保存时会生成文件。
+
+管理员权限节点为 `hyperconduit.admin`，控制台可直接使用：
+
+```text
+hyperconduit tunnel status
+hyperconduit tunnel restart
+hyperconduit tunnel config [配置项] [值]
+hyperconduit tunnel proxyprotocol on|off
+hyperconduit tunnel proxyprotocol input|output on|off
+```
+
+其中不带方向的 `proxyprotocol on|off` 与主线一致，控制 FRP 输入。可配置带宽、拥塞控制、口令、禁用 Brutal、超时、连接上限、可信来源及协议头输入/输出；`enabled` 与无效的 `disableVanillaTcp` 通过文件管理。配置修改直接读盘并原子保存，不自动重启；`restart` 会断开 HC 隧道连接，但不操作其他 TCP 连接。未运行时 `restart` 不会启动隧道程序，首次启用或启动失败后的恢复需要重启代理。口令查询不回显原文，但通过命令输入口令仍可能被 Velocity 或其他插件记录，建议直接编辑配置文件。
 
 ## 安装与使用
 
