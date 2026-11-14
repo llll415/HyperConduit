@@ -118,6 +118,7 @@ type fixedOutbound struct {
 	conns       *connSet
 	status      *statusStore
 	bridgeToken string
+	proxyOutput bool
 }
 
 func (o *fixedOutbound) TCP(request string) (net.Conn, error) {
@@ -165,6 +166,16 @@ func (o *fixedOutbound) dial(ctx context.Context, request string) (net.Conn, err
 		if err := writeBridgePreface(ctx, owned, o.bridgeToken, info); err != nil {
 			_ = owned.Close()
 			return nil, classifyError("bridge", err)
+		}
+	}
+	// The public PROXY protocol v2 header is written before the connection is
+	// handed back, so the target never sees game data first. Configuration
+	// validation keeps this mutually exclusive with the bridge preface; if a
+	// failure occurs the connection is discarded rather than downgraded.
+	if o.proxyOutput {
+		if err := writeProxyV2Output(ctx, owned); err != nil {
+			_ = owned.Close()
+			return nil, classifyProxyOutputError(err)
 		}
 	}
 	if o.status != nil {

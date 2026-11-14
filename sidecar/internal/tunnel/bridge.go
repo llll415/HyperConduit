@@ -7,11 +7,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net"
 	"net/netip"
 	"strconv"
-	"time"
 
 	"github.com/apernet/hysteria/core/v2/observe"
 )
@@ -27,10 +25,6 @@ const (
 	// bridgeTokenLength is the number of hexadecimal characters in a token
 	// derived from 32 random bytes by the Java control plane.
 	bridgeTokenLength = 64
-
-	// bridgeWriteWindow bounds preface writes when the caller supplied no
-	// deadline. The stream/request timeout remains the normal upper bound.
-	bridgeWriteWindow = 5 * time.Second
 )
 
 var (
@@ -100,29 +94,6 @@ func writeBridgePreface(ctx context.Context, conn net.Conn, token string, info o
 		return err
 	}
 
-	deadline, ok := ctx.Deadline()
-	if !ok {
-		deadline = time.Now().Add(bridgeWriteWindow)
-	}
-	if err := conn.SetWriteDeadline(deadline); err != nil {
-		return fmt.Errorf("bridge preface: set write deadline: %w", err)
-	}
-
-	canceled := make(chan struct{})
-	stopCancel := context.AfterFunc(ctx, func() {
-		defer close(canceled)
-		_ = conn.SetWriteDeadline(time.Now())
-	})
-	defer func() {
-		// Join the callback before clearing the deadline. Otherwise a callback
-		// that started just as the write finished could install a past deadline
-		// after the connection was handed to the bridge copy loop.
-		if !stopCancel() {
-			<-canceled
-		}
-		_ = conn.SetWriteDeadline(time.Time{})
-	}()
-
 	frame := make([]byte, 0, len(bridgeMagic)+4+len(payload))
 	frame = append(frame, bridgeMagic...)
 	var size [4]byte
@@ -130,14 +101,11 @@ func writeBridgePreface(ctx context.Context, conn net.Conn, token string, info o
 	frame = append(frame, size[:]...)
 	frame = append(frame, payload...)
 
-	if err := writeBridgeAll(conn, frame); err != nil {
-		if ctxErr := ctx.Err(); ctxErr != nil {
-			return ctxErr
-		}
-		// The connection deadline and the context deadline may fire at the same
-		// instant; the write can observe the timeout before ctx.Err() is set.
-		if deadline, ok := ctx.Deadline(); ok && !time.Now().Before(deadline) {
-			return context.DeadlineExceeded
+	if err := writePrefaceFrame(ctx, conn, frame); err != nil {
+		// Cancellation and deadline failures are already the caller's own
+		// context errors; anything else is an I/O failure on this connection.
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return err
 		}
 		return fmt.Errorf("bridge preface: write: %w", err)
 	}
@@ -180,13 +148,15 @@ func validateBridgePeer(peer string) error {
 	if err != nil || ip.IsUnspecified() {
 		return errBridgePeer
 	}
-	if !validBridgePort(port) {
+	if !validLiteralPort(port) {
 		return errBridgePeer
 	}
 	return nil
 }
 
-func validBridgePort(port string) bool {
+// validLiteralPort accepts a decimal port number in the range 1..65535. Signs,
+// spaces, and other net.SplitHostPort tolerances are rejected.
+func validLiteralPort(port string) bool {
 	if port == "" {
 		return false
 	}
@@ -197,24 +167,4 @@ func validBridgePort(port string) bool {
 	}
 	n, err := strconv.Atoi(port)
 	return err == nil && n >= 1 && n <= 65535
-}
-
-// writeBridgeAll handles short writes without relying on WriterTo/ReaderFrom
-// optimizations. A writer that returns (0, nil) is treated as a short write so
-// the preface can never loop forever.
-func writeBridgeAll(w io.Writer, p []byte) error {
-	for len(p) > 0 {
-		n, err := w.Write(p)
-		if n < 0 || n > len(p) {
-			return io.ErrShortWrite
-		}
-		p = p[n:]
-		if err != nil {
-			return err
-		}
-		if n == 0 {
-			return io.ErrShortWrite
-		}
-	}
-	return nil
 }

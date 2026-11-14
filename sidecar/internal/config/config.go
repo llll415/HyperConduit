@@ -80,6 +80,14 @@ type Config struct {
 	// Hostnames are never resolved or accepted. An empty list trusts nobody.
 	ProxyProtocolTrustedSources []string `json:"proxyProtocolTrustedSources"`
 
+	// ProxyProtocolV2Output is a server-only switch that makes every connection
+	// to the fixed Target start with a PROXY protocol v2 header, so a downstream
+	// TCP listener such as Velocity learns the real player address. The source is
+	// the peer the QUIC server already restored; the destination is the Target
+	// the sidecar dialed. It is disabled by default and cannot be combined with
+	// BridgeToken, which uses the private HCMETA01 preface instead.
+	ProxyProtocolV2Output bool `json:"proxyProtocolV2Output"`
+
 	// tcpAllowedPresent records whether the on-disk JSON contained the server-only
 	// tcpAllowed key. Client mode rejects its presence even when the value is false,
 	// so a server-only field is never silently accepted by a client config.
@@ -89,6 +97,9 @@ type Config struct {
 	// rejects their presence even when the values are false or an empty array.
 	proxyProtocolV2Present             bool
 	proxyProtocolTrustedSourcesPresent bool
+	// proxyProtocolV2OutputPresent records whether the on-disk JSON contained the
+	// server-only output switch, so client mode rejects it even when false.
+	proxyProtocolV2OutputPresent bool
 }
 
 // Load reads a strict JSON configuration file, applies defaults, and validates
@@ -126,6 +137,7 @@ func Load(path, mode string) (Config, error) {
 	_, cfg.tcpAllowedPresent = present["tcpAllowed"]
 	_, cfg.proxyProtocolV2Present = present["proxyProtocolV2"]
 	_, cfg.proxyProtocolTrustedSourcesPresent = present["proxyProtocolTrustedSources"]
+	_, cfg.proxyProtocolV2OutputPresent = present["proxyProtocolV2Output"]
 
 	return cfg.Normalize(mode)
 }
@@ -221,6 +233,9 @@ func (c Config) normalizeClient() (Config, error) {
 	if c.proxyProtocolTrustedSourcesPresent || c.ProxyProtocolTrustedSources != nil {
 		return Config{}, errors.New("proxyProtocolTrustedSources: only available in server mode")
 	}
+	if c.proxyProtocolV2OutputPresent || c.ProxyProtocolV2Output {
+		return Config{}, errors.New("proxyProtocolV2Output: only available in server mode")
+	}
 
 	return c, nil
 }
@@ -280,6 +295,13 @@ func (c Config) normalizeServer() (Config, error) {
 		return Config{}, errors.New("proxyProtocolTrustedSources: required when proxyProtocolV2 is enabled")
 	}
 	c.ProxyProtocolTrustedSources = sources
+
+	// The private HCMETA01 bridge preface and the public PROXY protocol v2
+	// header describe the same stream in incompatible formats. A downstream
+	// listener must not receive both, so the administrator picks one.
+	if c.ProxyProtocolV2Output && c.BridgeToken != "" {
+		return Config{}, errors.New("proxyProtocolV2Output: cannot be combined with bridgeToken")
+	}
 
 	return c, nil
 }

@@ -78,6 +78,9 @@ Java 管理时使用 `--managed`：stdin 接收 `{"version":1,"command":"shutdow
 | `connectTimeoutMs` | 5000 | 100–120000 |
 | `requestTimeoutMs` | 5000 | 100–120000 |
 | `idleTimeoutMs` | 30000 | 4000–120000 |
+| `proxyProtocolV2` | `false` | 仅服务端，接收端校验 Proxy Protocol v2 头部 |
+| `proxyProtocolTrustedSources` | 空 | 仅服务端，允许发送头部的字面 IP/CIDR，最多 128 条 |
+| `proxyProtocolV2Output` | `false` | 仅服务端，向固定目标发送 Proxy Protocol v2 头部；不能与 `bridgeToken` 同时启用 |
 
 ## 服务端身份
 
@@ -110,6 +113,14 @@ Java 管理时使用 `--managed`：stdin 接收 `{"version":1,"command":"shutdow
 - 服务端设置 token 后，客户端必须配置相同值；token 不会出现在日志或 CLI 参数中。
 - 配置校验：最长 1024 字节，仅 printable ASCII，不能有首尾空白或 CR/LF（HTTP 字段限制）。
 
+## Proxy Protocol v2
+
+- `proxyProtocolV2` 控制**接收**：开启后只信任 `proxyProtocolTrustedSources` 中列出的字面 IP/CIDR（最多 128 条，不支持域名或信任全部地址），并要求每段转发会话先给出合法的 v2 头部；头部声明的来源地址会成为该会话的 QUIC 对端。
+- `proxyProtocolV2Output` 控制**输出**：开启后服务端到固定 `target` 的每条 TCP 连接都先写入一个标准 PROXY protocol v2 头部（`PROXY` 命令、TCP over IPv4/IPv6、不含 TLV），供 Velocity 等下游代理还原真实玩家地址。默认关闭，保持原有直接转发行为。
+- 输出头部的来源是 QUIC 已还原的对端地址（可能来自接收端头部），目标是本进程实际拨号的固定 `target`；客户端既不能指定来源，也不能指定目标。同族地址编码为 TCP4/TCP6，跨族时使用 TCP6 并把 IPv4 一侧写成 IPv4-mapped 形式。
+- 头部完整写入后才转发游戏数据；地址校验或写入失败会关闭该连接并计入 `target`/传输类错误计数，不会中途降级为无头部连接。
+- `proxyProtocolV2Output` 与 `bridgeToken`（私有 `HCMETA01` 前言）互斥，同时启用会直接报配置错误。接收与输出互不影响，可以同时开启（例如 FRP → HC → Velocity）。
+
 ## 拥塞与带宽
 
 - `congestion` 仅支持 `bbr` 或 `reno`。
@@ -117,7 +128,7 @@ Java 管理时使用 `--managed`：stdin 接收 `{"version":1,"command":"shutdow
 - 服务端 `upMbps` / `downMbps` 分别限制向客户端发送/接收的**单连接 Brutal 协商速率**，不是全局限速，也不限制 BBR/Reno；仅设置服务端带宽不会强制启用 Brutal。
 - `disableBrutal` 仅服务端有效，`true` 时双向使用 BBR/Reno；默认 `false`。客户端必须保持 `false`。
 
-Java 接入使用内部 `bridgeToken` 启用私有 MC 元数据前言，并以 `serverEndpoint` 保留用户选择的信任地址。普通独立转发无需设置这两个字段；不要在公网普通 MC TCP 上启用来源头信任。
+Java 接入使用内部 `bridgeToken` 启用私有 MC 元数据前言，并以 `serverEndpoint` 保留用户选择的信任地址。普通独立转发无需设置这两个字段；不要在公网普通 MC TCP 上启用来源头信任。Velocity 适配改用 `proxyProtocolV2Output` 向 Velocity 发送标准头部，因此该模式不能同时设置 `bridgeToken`。
 
 `probe` 是 Java 列表发现专用的复用工作进程，stdin/stdout 使用有界 NDJSON 请求/结果，支持取消和 EOF 退出。它仅查询 `GET https://hyperconduit/capability`，不加载配置/口令、不读写信任文件，也不建立游戏转发流。探测使用未认证的服务器身份，只能用于提示；正式连接的 TLS/TOFU 和 token 校验不受影响。端点返回固定的 `{protocol,enabled}`，每条 QUIC 连接仅接受一次能力请求。
 

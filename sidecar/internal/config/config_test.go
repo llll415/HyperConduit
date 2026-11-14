@@ -75,6 +75,9 @@ func TestNormalizeServerDefaults(t *testing.T) {
 		t.Errorf("timeouts = %d/%d/%d, want 5000/5000/30000",
 			got.ConnectTimeoutMS, got.RequestTimeoutMS, got.IdleTimeoutMS)
 	}
+	if got.ProxyProtocolV2Output {
+		t.Error("ProxyProtocolV2Output = true, want false by default")
+	}
 }
 
 func TestNormalizeClientValid(t *testing.T) {
@@ -238,6 +241,7 @@ func TestNormalizeServerValid(t *testing.T) {
 				c.TCPAllowed = true
 				c.ProxyProtocolV2 = true
 				c.ProxyProtocolTrustedSources = []string{"127.0.0.1", "10.0.0.0/8"}
+				c.ProxyProtocolV2Output = true
 				c.MaxConnections = 1
 				c.MaxStreams = 1024
 				c.ConnectTimeoutMS = 100
@@ -286,6 +290,10 @@ func TestNormalizeServerInvalid(t *testing.T) {
 		{name: "congestion paced", cfg: with(valid, func(c *Config) { c.Congestion = "paced" }), wantField: "congestion"},
 		{name: "max connections high", cfg: with(valid, func(c *Config) { c.MaxConnections = 4097 }), wantField: "maxConnections"},
 		{name: "token too long", cfg: with(valid, func(c *Config) { c.Token = strings.Repeat("x", 1025) }), wantField: "token"},
+		{name: "output with bridge token", cfg: with(valid, func(c *Config) {
+			c.BridgeToken = strings.Repeat("0123456789abcdef", 4)
+			c.ProxyProtocolV2Output = true
+		}), wantField: "proxyProtocolV2Output"},
 	}
 
 	for _, tt := range tests {
@@ -554,6 +562,11 @@ func TestNormalizeClientRejectsProxyProtocolFields(t *testing.T) {
 			}),
 			wantField: "proxyProtocolTrustedSources",
 		},
+		{
+			name:      "output enabled",
+			cfg:       with(valid, func(c *Config) { c.ProxyProtocolV2Output = true }),
+			wantField: "proxyProtocolV2Output",
+		},
 	}
 
 	for _, tt := range tests {
@@ -599,6 +612,16 @@ func TestLoadClientRejectsPresentProxyProtocolFields(t *testing.T) {
 			name:    "source list",
 			content: `{"server":"example.com:443","proxyProtocolTrustedSources":["127.0.0.1"]}`,
 			want:    "proxyProtocolTrustedSources",
+		},
+		{
+			name:    "output false",
+			content: `{"server":"example.com:443","proxyProtocolV2Output":false}`,
+			want:    "proxyProtocolV2Output",
+		},
+		{
+			name:    "output true",
+			content: `{"server":"example.com:443","proxyProtocolV2Output":true}`,
+			want:    "proxyProtocolV2Output",
 		},
 	}
 
@@ -653,6 +676,65 @@ func TestLoadServerProxyProtocolRequiresSources(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "proxyProtocolTrustedSources") {
 		t.Fatalf("error %q does not mention proxyProtocolTrustedSources", err)
+	}
+}
+
+func TestLoadServerProxyProtocolOutput(t *testing.T) {
+	got, err := Load(writeConfigFile(t, `{
+		"target": "127.0.0.1:25565",
+		"certFile": "cert.pem",
+		"keyFile": "key.pem",
+		"proxyProtocolV2": true,
+		"proxyProtocolTrustedSources": ["127.0.0.1"],
+		"proxyProtocolV2Output": true
+	}`), ModeServer)
+	if err != nil {
+		t.Fatalf("Load returned unexpected error: %v", err)
+	}
+	if !got.ProxyProtocolV2Output {
+		t.Error("ProxyProtocolV2Output = false, want true")
+	}
+	if !got.ProxyProtocolV2 {
+		t.Error("ProxyProtocolV2 = false, want true: ingress and output are independent")
+	}
+}
+
+func TestLoadServerRejectsProxyProtocolOutputWithBridgeToken(t *testing.T) {
+	token := strings.Repeat("0123456789abcdef", 4)
+	_, err := Load(writeConfigFile(t, `{
+		"target": "127.0.0.1:25565",
+		"certFile": "cert.pem",
+		"keyFile": "key.pem",
+		"bridgeToken": "`+token+`",
+		"proxyProtocolV2Output": true
+	}`), ModeServer)
+	if err == nil {
+		t.Fatal("server config combined proxyProtocolV2Output with bridgeToken")
+	}
+	if !strings.Contains(err.Error(), "proxyProtocolV2Output") {
+		t.Fatalf("error %q does not mention proxyProtocolV2Output", err)
+	}
+	if strings.Contains(err.Error(), token) {
+		t.Fatalf("error leaks the bridge token: %v", err)
+	}
+}
+
+func TestLoadServerBridgeTokenWithoutOutputStaysValid(t *testing.T) {
+	token := strings.Repeat("0123456789abcdef", 4)
+	got, err := Load(writeConfigFile(t, `{
+		"target": "127.0.0.1:25565",
+		"certFile": "cert.pem",
+		"keyFile": "key.pem",
+		"bridgeToken": "`+token+`"
+	}`), ModeServer)
+	if err != nil {
+		t.Fatalf("Load returned unexpected error: %v", err)
+	}
+	if got.ProxyProtocolV2Output {
+		t.Error("ProxyProtocolV2Output = true, want false")
+	}
+	if got.BridgeToken != token {
+		t.Error("bridge token was not preserved")
 	}
 }
 
