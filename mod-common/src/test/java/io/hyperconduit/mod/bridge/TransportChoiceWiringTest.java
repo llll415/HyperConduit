@@ -20,7 +20,7 @@ class TransportChoiceWiringTest {
         assertTrue(connector.contains("io/hyperconduit/mod/bridge/ConnectionAttemptScope.snapshot"));
         List<String> dial = calls("io/hyperconduit/mod/mixin/client/ConnectionClientMixin");
         int snapshot = dial.indexOf("io/hyperconduit/mod/bridge/ConnectionAttemptScope.snapshot");
-        int global = dial.indexOf("io/hyperconduit/mod/config/ConfigHolder.get");
+        int global = dial.indexOf("io/hyperconduit/mod/config/ConfigHolder.getForConnection");
         assertTrue(snapshot >= 0 && global >= 0 && snapshot < global);
         assertTrue(dial.contains("io/hyperconduit/mod/probe/StatusProbeScope.active"),
                 "status pings must still bypass the login tunnel");

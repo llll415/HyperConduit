@@ -5,6 +5,9 @@ import io.hyperconduit.mod.config.ConfigHolder;
 import io.hyperconduit.mod.config.HyperConduitConfig;
 import io.hyperconduit.mod.bridge.TunnelMetrics;
 import io.hyperconduit.mod.bridge.TelemetryText;
+import io.hyperconduit.mod.probe.TunnelListenerState;
+import io.hyperconduit.neoforge.command.TunnelConfigCommands;
+import io.hyperconduit.neoforge.command.TunnelProcessCommands;
 import io.hyperconduit.neoforge.watch.CommandWatchKeys;
 import io.hyperconduit.neoforge.watch.WatchKey;
 import io.hyperconduit.neoforge.watch.WatchRegistry;
@@ -60,7 +63,10 @@ public final class HyperConduitServerEvents {
                     WATCHERS.remove(CommandWatchKeys.of(source));
                     source.sendSuccess(() -> Component.literal("[HyperConduit] 已停止实时状态输出。"), false);
                     return Command.SINGLE_SUCCESS;
-                }))));
+                })))
+                .then(TunnelConfigCommands.branch()
+                        .then(TunnelProcessCommands.status())
+                        .then(TunnelProcessCommands.restart())));
     }
 
     @SubscribeEvent
@@ -87,7 +93,12 @@ public final class HyperConduitServerEvents {
     }
 
     public static List<String> statusLines(MinecraftServer server) {
-        HyperConduitConfig config = ConfigHolder.get();
+        HyperConduitConfig config = null;
+        if (server != null && server.getConnection() instanceof TunnelListenerState state) {
+            config = state.hyperconduit$controllers().stream()
+                    .map(io.hyperconduit.mod.bridge.ServerTunnelController::runningConfig)
+                    .filter(java.util.Objects::nonNull).findFirst().orElse(null);
+        }
         List<String> lines = new ArrayList<>();
         lines.add("[HyperConduit] 服务端配置 | " + configStatus(config));
         if (server == null) return lines;
@@ -120,7 +131,8 @@ public final class HyperConduitServerEvents {
     }
 
     private static String configStatus(HyperConduitConfig config) {
-        if (config == null || !config.enabled) return "已禁用";
+        if (config == null) return "未运行";
+        if (!config.enabled) return "已禁用";
         return "已启用 | " + (config.disableBrutal ? "Brutal 禁用" : "允许协商 Brutal")
                 + " | 原版TCP" + (config.disableVanillaTcp ? "禁止" : "允许");
     }

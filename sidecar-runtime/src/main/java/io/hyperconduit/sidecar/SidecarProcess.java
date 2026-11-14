@@ -8,6 +8,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.LinkOption;
 import java.time.Duration;
+import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -19,6 +20,8 @@ import java.util.regex.Pattern;
 public final class SidecarProcess implements AutoCloseable {
     public record Ready(int version, String mode, InetSocketAddress listen, String fingerprint) {}
 
+    private static final System.Logger LOGGER =
+            System.getLogger(SidecarProcess.class.getName());
     private static final Set<String> ERROR_CODES = Set.of("config", "tls", "identity_changed", "storage",
             "authentication", "timeout", "canceled", "limit", "target", "transport");
     private static final byte[] OBSERVE_COMMAND =
@@ -41,6 +44,7 @@ public final class SidecarProcess implements AutoCloseable {
     private final AtomicBoolean telemetryStarted = new AtomicBoolean();
     private final Object controlLock = new Object();
     private final TelemetryTracker telemetry = new TelemetryTracker();
+    private final ProcessStatusSampler status;
     private final CountDownLatch stopped = new CountDownLatch(1);
     private final CountDownLatch readers = new CountDownLatch(2);
     private final Thread hook;
@@ -119,6 +123,15 @@ public final class SidecarProcess implements AutoCloseable {
         this.process = process;
         this.mode = mode;
         this.stopTimeout = stopTimeout;
+        Instant startedAt = null;
+        try {
+            startedAt = process.toHandle().info().startInstant().orElse(null);
+        } catch (RuntimeException unavailable) {
+            // Start time is optional; ProcessStatus reports it as unavailable.
+        }
+        this.status = new ProcessStatusSampler(process.toHandle(), process.pid(), startedAt,
+                Duration.ofSeconds(1),
+                ProcessMemory.commandBased() ? Duration.ofSeconds(5) : Duration.ZERO);
         hook = new Thread(this::close, "hyperconduit-sidecar-shutdown");
         Runtime.getRuntime().addShutdownHook(hook);
         deadline = TIMER.schedule(() -> fail("startup_timeout"), startupTimeout.toMillis(), TimeUnit.MILLISECONDS);
@@ -127,6 +140,7 @@ public final class SidecarProcess implements AutoCloseable {
         Thread.ofPlatform().daemon().name("hyperconduit-sidecar-exit").start(() -> {
             try {
                 int code = process.waitFor();
+                status.stop();
                 telemetry.clear();
                 readers.await(2, TimeUnit.SECONDS); // Allow final structured errors to drain first.
                 if (!stopping.get() && !failed.get()) {
@@ -153,6 +167,35 @@ public final class SidecarProcess implements AutoCloseable {
     public CompletableFuture<SidecarException> failure() { return failure.copy(); }
     public boolean isAlive() { return process.isAlive(); }
     public long pid() { return process.pid(); }
+
+    /**
+     * Returns a best-effort status sample for this managed process.
+     *
+     * <p>The first call starts a dedicated daemon sampler; later calls only
+     * read the latest sample and never block on OS probes. CPU is reported as a
+     * percentage of every logical processor available to this JVM (Windows
+     * Task Manager style: 100 means all cores). Resident memory is the OS
+     * working set/RSS and is {@code null} when the platform probe is
+     * unavailable; it is never replaced with Java heap usage.
+     */
+    public ProcessStatus processStatus() {
+        if (process.isAlive()) status.start();
+        return status.current();
+    }
+
+    /**
+     * True while the status sampler has not completed its first CPU
+     * observation. It lets a UI distinguish the initial "sampling" phase from
+     * a platform that genuinely cannot provide CPU or memory data.
+     *
+     * <p>This is a cheap, thread-safe query. It never starts the sampler or
+     * blocks on OS work; call {@link #processStatus()} to start sampling. A
+     * stopped process or a sampler that cannot obtain CPU timing reports
+     * {@code false} (unavailable rather than loading).
+     */
+    public boolean processStatusPending() {
+        return status.pending();
+    }
 
     /**
      * Opts this process into the bounded stats stream. The call is idempotent
@@ -279,6 +322,24 @@ public final class SidecarProcess implements AutoCloseable {
             else telemetry.accept(frame);
             return;
         }
+        if ("proxy_log".equals(type)) {
+            // Safe stderr diagnostic: only whitelisted, typed fields are
+            // formatted. The raw line is never retained or forwarded, and a
+            // malformed frame is ignored without affecting the process.
+            if (stdout) {
+                fail("protocol_invalid");
+            } else {
+                ProxyLogEvent.Event event = ProxyLogEvent.parse(root);
+                if (event != null) {
+                    try {
+                        LOGGER.log(System.Logger.Level.INFO, event.format());
+                    } catch (RuntimeException ignored) {
+                        // Logging is best effort; never stop draining stderr.
+                    }
+                }
+            }
+            return;
+        }
         try {
             dispatchLegacy(root, type, stdout);
         } catch (RuntimeException | IOException e) {
@@ -348,6 +409,7 @@ public final class SidecarProcess implements AutoCloseable {
     }
 
     private void fail(String code) {
+        status.stop();
         telemetry.clear();
         if (!failed.compareAndSet(false, true)) return;
         SidecarException error = new SidecarException(code);
@@ -362,6 +424,7 @@ public final class SidecarProcess implements AutoCloseable {
     }
 
     @Override public void close() {
+        status.stop();
         telemetry.clear();
         if (!stopping.compareAndSet(false, true)) {
             try { stopped.await(stopTimeout.toMillis() + 3000, TimeUnit.MILLISECONDS); }

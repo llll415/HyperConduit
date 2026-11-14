@@ -70,6 +70,7 @@ public final class ClientTunnelInitializer extends ChannelInitializer<Channel> {
                         ctx.channel().attr(TunnelAttributes.TUNNEL).set(true);
                         ctx.channel().attr(TunnelMetrics.SOURCE).set(process::telemetry);
                         ctx.channel().attr(TunnelMetrics.CLIENT).set(true);
+                        ctx.channel().attr(TunnelMetrics.RUNNING_CONFIG).set(config.copy());
                         process.enableTelemetry();
                         // The original optional local bind may target an external
                         // interface; the bridge must use a compatible loopback bind.

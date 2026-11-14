@@ -15,6 +15,9 @@ import java.util.function.BooleanSupplier;
  * <p>Multiple active listeners with the same policy aggregate as enabled-any / tcpAllowed-any.
  * If active sidecars disagree on {@code disableBrutal} or {@code tokenRequired}, the declaration
  * is conservatively {@link Capability#UNKNOWN} instead of reporting one listener's policy.
+ *
+ * <p>A listener's policy is mutable through {@link Handle#policy} so a controlled restart can
+ * publish the replacement process's actual settings after it reaches READY.
  */
 public final class CapabilityListenerRegistry {
 
@@ -70,12 +73,19 @@ public final class CapabilityListenerRegistry {
 
         void observeSidecar(BooleanSupplier alive);
 
+        /**
+         * Replaces this listener's start-time policy snapshot. A controlled restart calls this only
+         * after the replacement process is READY, so the aggregate never advertises an unapplied
+         * {@code disableBrutal} or token policy.
+         */
+        void policy(boolean disableBrutal, boolean tokenRequired);
+
         void remove();
     }
 
     private final class Listener implements Handle {
-        private final boolean disableBrutal;
-        private final boolean tokenRequired;
+        private volatile boolean disableBrutal;
+        private volatile boolean tokenRequired;
         private volatile boolean sidecarAlive;
         private volatile BooleanSupplier sidecarProbe;
         private volatile boolean publicTcpAlive;
@@ -118,6 +128,11 @@ public final class CapabilityListenerRegistry {
         @Override public void observeSidecar(BooleanSupplier alive) {
             sidecarProbe = java.util.Objects.requireNonNull(alive);
             sidecarAlive(alive.getAsBoolean());
+        }
+
+        @Override public void policy(boolean disableBrutal, boolean tokenRequired) {
+            this.disableBrutal = disableBrutal;
+            this.tokenRequired = tokenRequired;
         }
 
         private boolean isSidecarAlive() {

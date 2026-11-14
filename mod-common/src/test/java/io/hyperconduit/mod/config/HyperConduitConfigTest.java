@@ -21,6 +21,8 @@ import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -41,6 +43,9 @@ class HyperConduitConfigTest {
         assertEquals("", config.serverToken);
         assertEquals(5000, config.connectTimeoutMs);
         assertEquals(64, config.maxConnections);
+        assertFalse(config.proxyProtocolV2);
+        assertNotNull(config.proxyProtocolTrustedSources);
+        assertTrue(config.proxyProtocolTrustedSources.isEmpty());
     }
 
     @Test
@@ -67,6 +72,8 @@ class HyperConduitConfigTest {
         assertEquals("bbr", config.congestion);
         assertEquals(5000, config.connectTimeoutMs);
         assertEquals(64, config.maxConnections);
+        assertFalse(config.proxyProtocolV2);
+        assertTrue(config.proxyProtocolTrustedSources.isEmpty());
     }
 
     @Test
@@ -82,6 +89,8 @@ class HyperConduitConfigTest {
         config.serverToken = "server-token_456";
         config.connectTimeoutMs = 1234;
         config.maxConnections = 7;
+        config.proxyProtocolV2 = true;
+        config.proxyProtocolTrustedSources = List.of("127.0.0.1", "10.0.0.0/8", "::1");
 
         config.save(directory);
 
@@ -117,6 +126,12 @@ class HyperConduitConfigTest {
                 "{\"upMbps\":1.5}",
                 "{\"enabled\":1}",
                 "{\"clientToken\":null}",
+                "{\"proxyProtocolV2\":1}",
+                "{\"proxyProtocolTrustedSources\":\"127.0.0.1\"}",
+                "{\"proxyProtocolTrustedSources\":null}",
+                "{\"proxyProtocolTrustedSources\":[1]}",
+                "{\"proxyProtocolTrustedSources\":[null]}",
+                "{\"proxyProtocolTrustedSources\":[[\"127.0.0.1\"]]}",
                 "[]"
         };
 
@@ -210,6 +225,166 @@ class HyperConduitConfigTest {
         assertInvalid(config);
         config.serverToken = "café";
         assertInvalid(config);
+    }
+
+    @Test
+    void acceptsLiteralProxyProtocolSources() {
+        HyperConduitConfig config = new HyperConduitConfig();
+        List<String> valid = List.of(
+                "127.0.0.1",
+                "127.0.0.1/32",
+                "255.255.255.255/32",
+                "10.0.0.0/8",
+                "::1",
+                "::1/128",
+                "2001:db8::/32",
+                "2001:db8:0:0:0:0:0:1",
+                "1:2:3:4:5:6:192.0.2.1");
+
+        for (String source : valid) {
+            config.proxyProtocolTrustedSources = List.of(source);
+            assertDoesNotThrow(config::validate, source);
+        }
+
+        config.proxyProtocolV2 = true;
+        config.proxyProtocolTrustedSources = List.of("127.0.0.1");
+        assertDoesNotThrow(config::validate);
+    }
+
+    @Test
+    void rejectsNonLiteralOrMalformedProxyProtocolSources() {
+        HyperConduitConfig config = new HyperConduitConfig();
+        List<String> invalid = List.of(
+                "",
+                " ",
+                " localhost",
+                "localhost",
+                "example.com",
+                "127.0.0.1 ",
+                "1.2.3",
+                "1.2.3.4.5",
+                "256.0.0.1",
+                "01.2.3.4",
+                "1.2.3.4/33",
+                "1.2.3.4/-1",
+                "1.2.3.4/",
+                "1.2.3.4/024",
+                "1.2.3.4/32/1",
+                "1.2.3.4::",
+                "0.0.0.0",
+                "0.0.0.0/0",
+                "::",
+                "::/0",
+                "::ffff:192.0.2.1",
+                "::ffff:10.0.0.0/104",
+                "0:0:0:0:0:ffff:1.2.3.4",
+                "::g",
+                "1::2::3",
+                ":::",
+                "1:2:3:4:5:6:7",
+                "1:2:3:4:5:6:7:8:9",
+                "fe80::1%eth0",
+                "2001:db8::/129");
+
+        for (String source : invalid) {
+            config.proxyProtocolTrustedSources = List.of(source);
+            assertInvalid(config, source);
+        }
+
+        config.proxyProtocolTrustedSources = null;
+        assertInvalid(config, "null list");
+
+        config.proxyProtocolTrustedSources = new java.util.ArrayList<>();
+        for (int i = 0; i < 129; i++) {
+            config.proxyProtocolTrustedSources.add("10.0.0." + (i % 255));
+        }
+        IllegalStateException limit = assertThrows(IllegalStateException.class, config::validate);
+        assertEquals("config_proxy_protocol_sources_limit", limit.getMessage());
+    }
+
+    @Test
+    void requiresAtLeastOneSourceWhenProxyProtocolIsEnabled() {
+        HyperConduitConfig config = new HyperConduitConfig();
+        config.proxyProtocolV2 = true;
+        assertInvalid(config);
+
+        config.proxyProtocolTrustedSources = List.of("127.0.0.1");
+        assertDoesNotThrow(config::validate);
+
+        config.proxyProtocolV2 = false;
+        config.proxyProtocolTrustedSources = List.of();
+        assertDoesNotThrow(config::validate);
+    }
+
+    @Test
+    void cidrSourcesAreValidatedAfterMasking() {
+        HyperConduitConfig config = new HyperConduitConfig();
+
+        for (String source : List.of(
+                "10.1.2.3/8",
+                "192.168.1.5/24",
+                "0.0.0.1/32",
+                "2001:db8::1/32",
+                "8000::/1",
+                "::1/128")) {
+            config.proxyProtocolTrustedSources = List.of(source);
+            assertDoesNotThrow(config::validate, source);
+        }
+
+        for (String source : List.of(
+                "1.2.3.4/0",
+                "0.0.0.1/8",
+                "0.0.0.0/1",
+                "0.0.0.1/31",
+                "::1/0",
+                "::1/127",
+                "1:2:3:4:5:6:7:8/1",
+                "0:0:0:0:0:0:0:1/64")) {
+            config.proxyProtocolTrustedSources = List.of(source);
+            assertInvalid(config, source);
+        }
+    }
+
+    @Test
+    void cidrInputSpellingIsPreserved(@TempDir Path directory) throws Exception {
+        HyperConduitConfig config = new HyperConduitConfig();
+        config.proxyProtocolTrustedSources = List.of("10.1.2.3/8", "2001:db8::1/32");
+
+        config.save(directory);
+
+        assertEquals(List.of("10.1.2.3/8", "2001:db8::1/32"),
+                HyperConduitConfig.load(directory).proxyProtocolTrustedSources);
+    }
+
+    @Test
+    void acceptsAtMost128ProxyProtocolSources() {
+        HyperConduitConfig config = new HyperConduitConfig();
+        for (int i = 0; i < 128; i++) {
+            config.proxyProtocolTrustedSources.add("10.0." + (i / 256) + "." + (i % 256));
+        }
+
+        assertDoesNotThrow(config::validate);
+    }
+
+    @Test
+    void proxyProtocolFieldsParticipateInEqualityAndCopy() {
+        HyperConduitConfig original = new HyperConduitConfig();
+        original.proxyProtocolV2 = true;
+        original.proxyProtocolTrustedSources = new java.util.ArrayList<>(List.of("127.0.0.1"));
+
+        HyperConduitConfig copy = original.copy();
+        assertEquals(original, copy);
+        assertEquals(original.hashCode(), copy.hashCode());
+
+        copy.proxyProtocolTrustedSources.add("10.0.0.1");
+        assertFalse(original.proxyProtocolTrustedSources.contains("10.0.0.1"));
+        assertNotEquals(original, copy);
+
+        HyperConduitConfig other = new HyperConduitConfig();
+        other.proxyProtocolV2 = true;
+        other.proxyProtocolTrustedSources = List.of("127.0.0.1");
+        assertEquals(original, other);
+        assertEquals(original.hashCode(), other.hashCode());
     }
 
     @Test
@@ -345,5 +520,9 @@ class HyperConduitConfigTest {
 
     private static void assertInvalid(HyperConduitConfig config) {
         assertThrows(IllegalStateException.class, config::validate);
+    }
+
+    private static void assertInvalid(HyperConduitConfig config, String message) {
+        assertThrows(IllegalStateException.class, config::validate, message);
     }
 }

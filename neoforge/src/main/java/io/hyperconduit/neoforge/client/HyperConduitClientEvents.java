@@ -1,6 +1,7 @@
 package io.hyperconduit.neoforge.client;
 
 import com.mojang.brigadier.Command;
+import io.hyperconduit.mod.config.ConfigErrorText;
 import io.hyperconduit.mod.config.ConfigHolder;
 import io.hyperconduit.mod.config.HyperConduitConfig;
 import io.hyperconduit.mod.bridge.TunnelMetrics;
@@ -53,14 +54,24 @@ public final class HyperConduitClientEvents {
             event.getLeft().addAll(HyperConduitServerEvents.statusLines(minecraft.getSingleplayerServer()));
             return;
         }
-        event.getLeft().addAll(clientStatusLines(activeConnection(), ConfigHolder.get()));
+        Connection connection = activeConnection();
+        var running = connection == null || connection.channel() == null ? null
+                : connection.channel().attr(TunnelMetrics.RUNNING_CONFIG).get();
+        event.getLeft().addAll(clientStatusLines(connection, running));
     }
 
     @SubscribeEvent
     public static void registerClientCommands(RegisterClientCommandsEvent event) {
         event.getDispatcher().register(Commands.literal("hyperconduit")
                 .then(Commands.literal("status").executes(context -> {
-                    for (String line : clientStatusLines(activeConnection(), ConfigHolder.get())) {
+                    HyperConduitConfig config;
+                    try {
+                        config = ConfigHolder.getForConnection();
+                    } catch (RuntimeException failure) {
+                        context.getSource().sendFailure(Component.literal(ConfigErrorText.describe(failure)));
+                        return 0;
+                    }
+                    for (String line : clientStatusLines(activeConnection(), config)) {
                         context.getSource().sendSuccess(() -> Component.literal(line), false);
                     }
                     return Command.SINGLE_SUCCESS;
@@ -78,7 +89,7 @@ public final class HyperConduitClientEvents {
 
     static List<String> clientStatusLines(Connection connection, HyperConduitConfig config) {
         if (!isTunnel(connection)) {
-            String state = config != null && config.enabled ? "§e[未使用隧道]§r" : "§7[已禁用]§r";
+            String state = config == null || config.enabled ? "§e[未使用隧道]§r" : "§7[已禁用]§r";
             return List.of("§b[HyperConduit]§r " + state);
         }
         List<String> lines = new ArrayList<>();

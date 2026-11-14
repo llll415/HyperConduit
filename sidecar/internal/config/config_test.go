@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -235,6 +236,8 @@ func TestNormalizeServerValid(t *testing.T) {
 				c.DownMbps = 1_000_000
 				c.DisableBrutal = true
 				c.TCPAllowed = true
+				c.ProxyProtocolV2 = true
+				c.ProxyProtocolTrustedSources = []string{"127.0.0.1", "10.0.0.0/8"}
 				c.MaxConnections = 1
 				c.MaxStreams = 1024
 				c.ConnectTimeoutMS = 100
@@ -295,6 +298,398 @@ func TestNormalizeServerInvalid(t *testing.T) {
 				t.Fatalf("error %q does not mention field %q", err, tt.wantField)
 			}
 		})
+	}
+}
+
+func TestNormalizeServerProxyProtocolSources(t *testing.T) {
+	base := Config{
+		Target:   "example.com:25565",
+		CertFile: "cert.pem",
+		KeyFile:  "key.pem",
+	}
+
+	got := normalizeOK(t, with(base, func(c *Config) {
+		c.ProxyProtocolV2 = true
+		c.ProxyProtocolTrustedSources = []string{
+			"127.0.0.1",
+			"10.0.0.0/8",
+			"192.168.1.5/24",
+			"1.2.3.4/8",
+			"128.0.0.0/1",
+			"::1",
+			"2001:DB8:0:0::/32",
+			"10.0.0.0/8",
+		}
+	}), ModeServer)
+
+	if !got.ProxyProtocolV2 {
+		t.Error("ProxyProtocolV2 = false, want true")
+	}
+	want := []string{"127.0.0.1", "10.0.0.0/8", "192.168.1.0/24", "1.0.0.0/8", "128.0.0.0/1", "::1", "2001:db8::/32"}
+	if len(got.ProxyProtocolTrustedSources) != len(want) {
+		t.Fatalf("trusted sources = %v, want %v", got.ProxyProtocolTrustedSources, want)
+	}
+	for i, source := range want {
+		if got.ProxyProtocolTrustedSources[i] != source {
+			t.Fatalf("trusted sources = %v, want %v", got.ProxyProtocolTrustedSources, want)
+		}
+	}
+}
+
+func TestNormalizeServerProxyProtocolSourcesIdempotent(t *testing.T) {
+	base := Config{
+		Target:   "example.com:25565",
+		CertFile: "cert.pem",
+		KeyFile:  "key.pem",
+	}
+	first := normalizeOK(t, with(base, func(c *Config) {
+		c.ProxyProtocolV2 = true
+		c.ProxyProtocolTrustedSources = []string{"1.2.3.4/8", "2001:DB8:0:0::/32"}
+	}), ModeServer)
+	second := normalizeOK(t, first, ModeServer)
+
+	if len(second.ProxyProtocolTrustedSources) != len(first.ProxyProtocolTrustedSources) {
+		t.Fatalf("trusted sources = %v, want %v",
+			second.ProxyProtocolTrustedSources, first.ProxyProtocolTrustedSources)
+	}
+	for i := range first.ProxyProtocolTrustedSources {
+		if second.ProxyProtocolTrustedSources[i] != first.ProxyProtocolTrustedSources[i] {
+			t.Fatalf("trusted sources = %v, want %v",
+				second.ProxyProtocolTrustedSources, first.ProxyProtocolTrustedSources)
+		}
+	}
+}
+
+func TestNormalizeServerProxyProtocolDisabledWithSources(t *testing.T) {
+	base := Config{
+		Target:   "example.com:25565",
+		CertFile: "cert.pem",
+		KeyFile:  "key.pem",
+	}
+	got := normalizeOK(t, with(base, func(c *Config) {
+		c.ProxyProtocolTrustedSources = []string{"127.0.0.1"}
+	}), ModeServer)
+	if got.ProxyProtocolV2 {
+		t.Error("ProxyProtocolV2 = true, want false")
+	}
+	if len(got.ProxyProtocolTrustedSources) != 1 {
+		t.Fatalf("trusted sources = %v, want one entry", got.ProxyProtocolTrustedSources)
+	}
+}
+
+func TestNormalizeServerProxyProtocolMaxSources(t *testing.T) {
+	sources := make([]string, maxProxyProtocolTrustedSources)
+	for i := range sources {
+		sources[i] = fmt.Sprintf("127.0.0.%d", i+1)
+	}
+	base := Config{
+		Target:   "example.com:25565",
+		CertFile: "cert.pem",
+		KeyFile:  "key.pem",
+	}
+	got := normalizeOK(t, with(base, func(c *Config) {
+		c.ProxyProtocolV2 = true
+		c.ProxyProtocolTrustedSources = sources
+	}), ModeServer)
+	if len(got.ProxyProtocolTrustedSources) != maxProxyProtocolTrustedSources {
+		t.Fatalf("trusted sources = %d entries, want %d",
+			len(got.ProxyProtocolTrustedSources), maxProxyProtocolTrustedSources)
+	}
+}
+
+func TestNormalizeServerProxyProtocolInvalid(t *testing.T) {
+	base := Config{
+		Target:   "example.com:25565",
+		CertFile: "cert.pem",
+		KeyFile:  "key.pem",
+	}
+
+	tests := []struct {
+		name    string
+		cfg     Config
+		wantErr string
+	}{
+		{
+			name:    "v2 without sources",
+			cfg:     with(base, func(c *Config) { c.ProxyProtocolV2 = true }),
+			wantErr: "required",
+		},
+		{
+			name: "v2 with empty sources",
+			cfg: with(base, func(c *Config) {
+				c.ProxyProtocolV2 = true
+				c.ProxyProtocolTrustedSources = []string{}
+			}),
+			wantErr: "required",
+		},
+		{name: "hostname", cfg: with(base, func(c *Config) {
+			c.ProxyProtocolTrustedSources = []string{"proxy.example.com"}
+		})},
+		{name: "empty entry", cfg: with(base, func(c *Config) {
+			c.ProxyProtocolTrustedSources = []string{""}
+		})},
+		{name: "leading space", cfg: with(base, func(c *Config) {
+			c.ProxyProtocolTrustedSources = []string{" 127.0.0.1"}
+		})},
+		{name: "trailing space", cfg: with(base, func(c *Config) {
+			c.ProxyProtocolTrustedSources = []string{"127.0.0.1 "}
+		})},
+		{name: "leading tab", cfg: with(base, func(c *Config) {
+			c.ProxyProtocolTrustedSources = []string{"\t127.0.0.1"}
+		})},
+		{name: "ipv4 leading zero", cfg: with(base, func(c *Config) {
+			c.ProxyProtocolTrustedSources = []string{"010.0.0.1"}
+		})},
+		{name: "ipv4 octet out of range", cfg: with(base, func(c *Config) {
+			c.ProxyProtocolTrustedSources = []string{"256.0.0.1"}
+		})},
+		{name: "ipv4 shorthand", cfg: with(base, func(c *Config) {
+			c.ProxyProtocolTrustedSources = []string{"127.1"}
+		})},
+		{name: "zoned address", cfg: with(base, func(c *Config) {
+			c.ProxyProtocolTrustedSources = []string{"fe80::1%eth0"}
+		})},
+		{name: "zoned cidr", cfg: with(base, func(c *Config) {
+			c.ProxyProtocolTrustedSources = []string{"fe80::%eth0/64"}
+		})},
+		{name: "unspecified ipv4", cfg: with(base, func(c *Config) {
+			c.ProxyProtocolTrustedSources = []string{"0.0.0.0"}
+		})},
+		{name: "unspecified ipv6", cfg: with(base, func(c *Config) {
+			c.ProxyProtocolTrustedSources = []string{"::"}
+		})},
+		{name: "unspecified ipv4 cidr", cfg: with(base, func(c *Config) {
+			c.ProxyProtocolTrustedSources = []string{"0.0.0.0/0"}
+		})},
+		{name: "unspecified ipv6 cidr", cfg: with(base, func(c *Config) {
+			c.ProxyProtocolTrustedSources = []string{"::/0"}
+		})},
+		{name: "ipv4 host bits mask to unspecified /0", cfg: with(base, func(c *Config) {
+			c.ProxyProtocolTrustedSources = []string{"1.2.3.4/0"}
+		})},
+		{name: "ipv4 host bits mask to unspecified /1", cfg: with(base, func(c *Config) {
+			c.ProxyProtocolTrustedSources = []string{"127.0.0.1/1"}
+		})},
+		{name: "ipv6 host bits mask to unspecified /1", cfg: with(base, func(c *Config) {
+			c.ProxyProtocolTrustedSources = []string{"::1/1"}
+		})},
+		{name: "ipv4 mapped address", cfg: with(base, func(c *Config) {
+			c.ProxyProtocolTrustedSources = []string{"::ffff:127.0.0.1"}
+		})},
+		{name: "ipv4 mapped cidr", cfg: with(base, func(c *Config) {
+			c.ProxyProtocolTrustedSources = []string{"::ffff:10.0.0.0/104"}
+		})},
+		{name: "ipv4 prefix too long", cfg: with(base, func(c *Config) {
+			c.ProxyProtocolTrustedSources = []string{"10.0.0.0/33"}
+		})},
+		{name: "ipv6 prefix too long", cfg: with(base, func(c *Config) {
+			c.ProxyProtocolTrustedSources = []string{"2001:db8::/129"}
+		})},
+		{name: "negative prefix", cfg: with(base, func(c *Config) {
+			c.ProxyProtocolTrustedSources = []string{"10.0.0.0/-1"}
+		})},
+		{name: "double slash", cfg: with(base, func(c *Config) {
+			c.ProxyProtocolTrustedSources = []string{"10.0.0.0/8/8"}
+		})},
+		{name: "empty prefix", cfg: with(base, func(c *Config) {
+			c.ProxyProtocolTrustedSources = []string{"10.0.0.0/"}
+		})},
+		{name: "missing address", cfg: with(base, func(c *Config) {
+			c.ProxyProtocolTrustedSources = []string{"/8"}
+		})},
+		{name: "too many entries", cfg: with(base, func(c *Config) {
+			sources := make([]string, maxProxyProtocolTrustedSources+1)
+			for i := range sources {
+				sources[i] = fmt.Sprintf("127.0.0.%d", i+1)
+			}
+			c.ProxyProtocolTrustedSources = sources
+		})},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := tt.cfg.Normalize(ModeServer)
+			if err == nil {
+				t.Fatal("Normalize returned nil error")
+			}
+			if !strings.Contains(err.Error(), "proxyProtocolTrustedSources") {
+				t.Fatalf("error %q does not mention proxyProtocolTrustedSources", err)
+			}
+			if tt.wantErr != "" && !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("error %q does not contain %q", err, tt.wantErr)
+			}
+			for _, source := range tt.cfg.ProxyProtocolTrustedSources {
+				if source != "" && strings.Contains(err.Error(), source) {
+					t.Fatalf("error leaks trusted source value %q: %v", source, err)
+				}
+			}
+		})
+	}
+}
+
+func TestNormalizeClientRejectsProxyProtocolFields(t *testing.T) {
+	valid := Config{Server: "example.com:443"}
+
+	tests := []struct {
+		name      string
+		cfg       Config
+		wantField string
+	}{
+		{
+			name:      "v2 enabled",
+			cfg:       with(valid, func(c *Config) { c.ProxyProtocolV2 = true }),
+			wantField: "proxyProtocolV2",
+		},
+		{
+			name: "empty source list",
+			cfg: with(valid, func(c *Config) {
+				c.ProxyProtocolTrustedSources = []string{}
+			}),
+			wantField: "proxyProtocolTrustedSources",
+		},
+		{
+			name: "source list",
+			cfg: with(valid, func(c *Config) {
+				c.ProxyProtocolTrustedSources = []string{"127.0.0.1"}
+			}),
+			wantField: "proxyProtocolTrustedSources",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := tt.cfg.Normalize(ModeClient)
+			if err == nil {
+				t.Fatal("Normalize returned nil error")
+			}
+			if !strings.Contains(err.Error(), tt.wantField) {
+				t.Fatalf("error %q does not mention %q", err, tt.wantField)
+			}
+		})
+	}
+}
+
+func TestLoadClientRejectsPresentProxyProtocolFields(t *testing.T) {
+	tests := []struct {
+		name    string
+		content string
+		want    string
+	}{
+		{
+			name:    "v2 false",
+			content: `{"server":"example.com:443","proxyProtocolV2":false}`,
+			want:    "proxyProtocolV2",
+		},
+		{
+			name:    "v2 true",
+			content: `{"server":"example.com:443","proxyProtocolV2":true}`,
+			want:    "proxyProtocolV2",
+		},
+		{
+			name:    "empty sources",
+			content: `{"server":"example.com:443","proxyProtocolTrustedSources":[]}`,
+			want:    "proxyProtocolTrustedSources",
+		},
+		{
+			name:    "null sources",
+			content: `{"server":"example.com:443","proxyProtocolTrustedSources":null}`,
+			want:    "proxyProtocolTrustedSources",
+		},
+		{
+			name:    "source list",
+			content: `{"server":"example.com:443","proxyProtocolTrustedSources":["127.0.0.1"]}`,
+			want:    "proxyProtocolTrustedSources",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := Load(writeConfigFile(t, tt.content), ModeClient)
+			if err == nil {
+				t.Fatal("client config accepted a server-only PROXY protocol key")
+			}
+			if !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("error %q does not mention %q", err, tt.want)
+			}
+		})
+	}
+}
+
+func TestLoadServerProxyProtocol(t *testing.T) {
+	got, err := Load(writeConfigFile(t, `{
+		"target": "example.com:25565",
+		"certFile": "cert.pem",
+		"keyFile": "key.pem",
+		"proxyProtocolV2": true,
+		"proxyProtocolTrustedSources": ["127.0.0.1", "10.0.0.0/8", "::1"]
+	}`), ModeServer)
+	if err != nil {
+		t.Fatalf("Load returned unexpected error: %v", err)
+	}
+	if !got.ProxyProtocolV2 {
+		t.Error("ProxyProtocolV2 = false, want true")
+	}
+	want := []string{"127.0.0.1", "10.0.0.0/8", "::1"}
+	if len(got.ProxyProtocolTrustedSources) != len(want) {
+		t.Fatalf("trusted sources = %v, want %v", got.ProxyProtocolTrustedSources, want)
+	}
+	for i, source := range want {
+		if got.ProxyProtocolTrustedSources[i] != source {
+			t.Fatalf("trusted sources = %v, want %v", got.ProxyProtocolTrustedSources, want)
+		}
+	}
+}
+
+func TestLoadServerProxyProtocolRequiresSources(t *testing.T) {
+	_, err := Load(writeConfigFile(t, `{
+		"target": "example.com:25565",
+		"certFile": "cert.pem",
+		"keyFile": "key.pem",
+		"proxyProtocolV2": true,
+		"proxyProtocolTrustedSources": []
+	}`), ModeServer)
+	if err == nil {
+		t.Fatal("server config accepted proxyProtocolV2 without trusted sources")
+	}
+	if !strings.Contains(err.Error(), "proxyProtocolTrustedSources") {
+		t.Fatalf("error %q does not mention proxyProtocolTrustedSources", err)
+	}
+}
+
+func TestLoadServerRejectsInvalidProxyProtocolSourceWithoutLeaking(t *testing.T) {
+	const entry = "SECRET-PROXY-HOST.invalid"
+	_, err := Load(writeConfigFile(t, `{
+		"target": "example.com:25565",
+		"certFile": "cert.pem",
+		"keyFile": "key.pem",
+		"proxyProtocolTrustedSources": ["`+entry+`"]
+	}`), ModeServer)
+	if err == nil {
+		t.Fatal("server config accepted a hostname trusted source")
+	}
+	if !strings.Contains(err.Error(), "proxyProtocolTrustedSources") {
+		t.Fatalf("error %q does not mention proxyProtocolTrustedSources", err)
+	}
+	if strings.Contains(err.Error(), entry) {
+		t.Fatalf("error leaks trusted source value: %v", err)
+	}
+}
+
+func TestLoadServerProxyProtocolTypeErrorRedactsValues(t *testing.T) {
+	_, err := Load(writeConfigFile(t, `{
+		"target": "example.com:25565",
+		"certFile": "cert.pem",
+		"keyFile": "key.pem",
+		"proxyProtocolTrustedSources": ["10.0.0.0/8", 123]
+	}`), ModeServer)
+	if err == nil {
+		t.Fatal("server config accepted a non-string trusted source")
+	}
+	if !strings.Contains(err.Error(), "proxyProtocolTrustedSources") {
+		t.Fatalf("error %q does not mention proxyProtocolTrustedSources", err)
+	}
+	if strings.Contains(err.Error(), "10.0.0.0/8") {
+		t.Fatalf("error leaks trusted source value: %v", err)
 	}
 }
 

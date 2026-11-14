@@ -8,7 +8,7 @@ import net.neoforged.fml.loading.FMLPaths;
 import java.nio.file.Path;
 
 /**
- * NeoForge entrypoint: loads the config and hands it to the shared Mixin layer.
+ * NeoForge entrypoint: registers the config directory and logs the current on-disk config.
  *
  * <p>Everything else — the mixins, the tunnel channels, the congestion control — lives in the
  * loader-agnostic {@code mod-common} module. This class only exists because NeoForge needs a
@@ -20,8 +20,13 @@ public final class HyperConduitNeoForge {
 
     public HyperConduitNeoForge() {
         Path configDir = FMLPaths.CONFIGDIR.get();
-        HyperConduitConfig config = HyperConduitConfig.load(configDir);
-        ConfigHolder.install(config, configDir);
+        // Only the directory is registered; ConfigHolder reads the file at each operation boundary
+        // instead of keeping a process-wide snapshot that could go stale after an external edit.
+        ConfigHolder.install(configDir);
+        HyperConduitConfig config = ConfigHolder.get();
+        if (config == null) {
+            throw new IllegalStateException("HyperConduit config directory is not installed");
+        }
         System.out.println("[HyperConduit] config: " + config);
         if (!config.enabled) {
             System.out.println("[HyperConduit] the tunnel is DISABLED, so connections behave exactly "

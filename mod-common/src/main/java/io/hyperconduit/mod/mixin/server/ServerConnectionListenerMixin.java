@@ -1,7 +1,8 @@
 package io.hyperconduit.mod.mixin.server;
 
-import io.hyperconduit.mod.bridge.TunnelService;
+import io.hyperconduit.mod.bridge.ServerTunnelController;
 import io.hyperconduit.mod.bridge.TunnelMetrics;
+import io.hyperconduit.mod.client.LanStartupFailure;
 import io.hyperconduit.mod.config.ConfigHolder;
 import io.hyperconduit.mod.config.HyperConduitConfig;
 import io.hyperconduit.mod.probe.CapabilityDetails;
@@ -28,13 +29,12 @@ import java.security.SecureRandom;
 import java.util.HexFormat;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
-import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 
 @Mixin(ServerConnectionListener.class)
 public abstract class ServerConnectionListenerMixin implements TunnelListenerState {
-    @Unique private final List<ChannelFuture> hyperconduit$backends = new CopyOnWriteArrayList<>();
-    @Unique private final List<SidecarProcess> hyperconduit$children = new CopyOnWriteArrayList<>();
     @Unique private final CapabilityListenerRegistry hyperconduit$listeners = new CapabilityListenerRegistry();
+    @Unique private final List<ServerTunnelController> hyperconduit$controllers = new CopyOnWriteArrayList<>();
 
     @Override public boolean hyperconduit$acceptsTunnels() {
         return hyperconduit$listeners.anySidecarAlive();
@@ -42,6 +42,10 @@ public abstract class ServerConnectionListenerMixin implements TunnelListenerSta
 
     @Override public CapabilityDetails hyperconduit$declaration() {
         return hyperconduit$listeners.declaration();
+    }
+
+    @Override public List<ServerTunnelController> hyperconduit$controllers() {
+        return List.copyOf(hyperconduit$controllers);
     }
 
     /**
@@ -67,10 +71,26 @@ public abstract class ServerConnectionListenerMixin implements TunnelListenerSta
     }
 
     @Unique
+    private SidecarException hyperconduit$failure(String code) {
+        SidecarException failure = new SidecarException(code);
+        LanStartupFailure.record(failure);
+        return failure;
+    }
+
+    @Unique
     private ChannelFuture hyperconduit$bindInternal(ServerBootstrap bootstrap) throws Exception {
-        HyperConduitConfig current = ConfigHolder.get();
         // Domain sockets are not public Minecraft TCP endpoints, even with the tunnel disabled.
         if (!(bootstrap.config().localAddress() instanceof InetSocketAddress requested)) return bootstrap.bind();
+        HyperConduitConfig current;
+        try {
+            current = ConfigHolder.get();
+        } catch (RuntimeException failure) {
+            // ConfigHolder may read from disk. Never echo file contents or paths; keep the
+            // user-facing text Chinese and expose only the safe config error code.
+            System.getLogger("io.hyperconduit.HyperConduit").log(System.Logger.Level.WARNING,
+                    "[HyperConduit] 无法读取服务端配置，隧道未启动。");
+            throw hyperconduit$failure("config");
+        }
         if (current == null || !current.enabled) {
             // Vanilla-only listener: the registry learns tcpAllowed only after bind succeeds.
             ChannelFuture vanilla = bootstrap.bind();
@@ -79,22 +99,23 @@ public abstract class ServerConnectionListenerMixin implements TunnelListenerSta
         }
         HyperConduitConfig config = current.copy();
         if (config.disableVanillaTcp && requested.getPort() == 0) {
-            throw new SidecarException("listener_port_required");
+            throw hyperconduit$failure("listener_port_required");
         }
         ChannelFuture vanilla = null;
         ChannelFuture backend = null;
-        SidecarProcess child = null;
         CapabilityListenerRegistry.Handle handle = null;
+        ServerTunnelController controller = null;
         try {
             if (!config.disableVanillaTcp) vanilla = bootstrap.bind().syncUninterruptibly();
             int port = vanilla == null ? requested.getPort() : ((InetSocketAddress) vanilla.channel().localAddress()).getPort();
-            // Snapshot this listener's policy now; later config edits cannot change it.
+            // Snapshot this listener's policy now; later config edits cannot change it until a
+            // controlled restart publishes the replacement process's READY policy.
             handle = hyperconduit$listeners.add(vanilla, config.disableBrutal, !config.serverToken.isEmpty());
             byte[] random = new byte[32];
             new SecureRandom().nextBytes(random);
             String secret = HexFormat.of().formatHex(random);
-            var processRef = new java.util.concurrent.atomic.AtomicReference<SidecarProcess>();
-            var bridge = new BridgeInitializer(secret, bootstrap.config().childHandler());
+            AtomicReference<SidecarProcess> processRef = new AtomicReference<>();
+            BridgeInitializer bridge = new BridgeInitializer(secret, bootstrap.config().childHandler());
             // Youer sets AUTO_READ=false on the public listener and re-enables it from
             // acceptConnections(); our private backend is not in its channel list, so it
             // must accept on its own. clone() otherwise preserves Paper's options.
@@ -104,46 +125,65 @@ public abstract class ServerConnectionListenerMixin implements TunnelListenerSta
                     .localAddress(new InetSocketAddress(InetAddress.getByName("127.0.0.1"), 0));
             backend = privateBootstrap.bind().syncUninterruptibly();
             InetSocketAddress udp = new InetSocketAddress(requested.getAddress(), port);
-            child = TunnelService.server(config, udp, (InetSocketAddress) backend.channel().localAddress(),
-                    secret, vanilla != null);
-            child.ready().get(config.connectTimeoutMs + 6000L, TimeUnit.MILLISECONDS);
-            processRef.set(child);
-            child.enableTelemetry();
-            hyperconduit$backends.add(backend);
-            hyperconduit$children.add(child);
-            ChannelFuture ownedBackend = backend;
-            SidecarProcess ownedChild = child;
-            CapabilityListenerRegistry.Handle ownedHandle = handle;
-            ownedHandle.observeSidecar(ownedChild::isAlive);
-            child.exit().thenAccept(code -> {
-                ownedBackend.channel().close();
-                // Keep the public-TCP fact until its own closeFuture removes the entry;
-                // only enabled must disappear here.
-                ownedHandle.sidecarAlive(false);
-            });
-            backend.channel().closeFuture().addListener(future -> Thread.ofVirtual().start(ownedChild::close));
+            controller = ServerTunnelController.create(backend.channel(), udp, vanilla != null, secret,
+                    handle, processRef);
+            // The controller owns the private backend and bridge secret across restarts.
+            controller.start(config);
+            hyperconduit$controllers.add(controller);
             if (vanilla != null) {
+                ChannelFuture ownedBackend = backend;
                 vanilla.channel().closeFuture().addListener(future -> ownedBackend.channel().close());
                 return vanilla;
             }
             // Minecraft/LAN still advertises the requested external port; its
             // private backend's actual random port is never published to peers.
             return backend;
-        } catch (Exception ignored) {
-            if (handle != null) handle.remove();
-            if (child != null) child.close();
-            if (backend != null) backend.channel().close();
-            if (vanilla != null) vanilla.channel().close();
-            throw new SidecarException("listener_failed");
+        } catch (SidecarException failure) {
+            // Publish the safe Chinese reason to the client LAN attempt, if one is active.
+            // Dedicated servers have no active attempt, so this call is a no-op there.
+            LanStartupFailure.record(failure);
+            hyperconduit$cleanup(controller, handle, backend, vanilla);
+            // Keep the safe, code-only reason (for example binary_unavailable or authentication)
+            // instead of flattening every failure into listener_failed.
+            throw failure;
+        } catch (Exception failure) {
+            SidecarException safe = hyperconduit$failure("listener_failed");
+            hyperconduit$cleanup(controller, handle, backend, vanilla);
+            throw safe;
         }
+    }
+
+    @Unique
+    private void hyperconduit$cleanup(ServerTunnelController controller,
+                                      CapabilityListenerRegistry.Handle handle,
+                                      ChannelFuture backend, ChannelFuture vanilla) {
+        // Best effort: never let cleanup hide the original, safe startup error.
+        if (controller != null) {
+            try {
+                controller.close();
+            } catch (RuntimeException ignored) {
+                // The original startup failure is more useful than a cleanup failure.
+            }
+        }
+        if (handle != null) {
+            try {
+                handle.remove();
+            } catch (RuntimeException ignored) {
+                // Registry cleanup is idempotent and cannot repair a failed bind.
+            }
+        }
+        if (backend != null) backend.channel().close();
+        if (vanilla != null) vanilla.channel().close();
     }
 
     @Inject(method = "stop", at = @At("HEAD"))
     private void hyperconduit$stop(CallbackInfo ci) {
-        hyperconduit$backends.forEach(future -> future.channel().close());
-        hyperconduit$children.forEach(SidecarProcess::close);
-        hyperconduit$backends.clear();
-        hyperconduit$children.clear();
+        // Mark every controller stopped before blocking on child shutdown, so an in-flight
+        // restart cannot publish or leak a replacement process.
+        for (ServerTunnelController controller : hyperconduit$controllers) {
+            controller.close();
+        }
+        hyperconduit$controllers.clear();
         hyperconduit$listeners.clear();
     }
 }

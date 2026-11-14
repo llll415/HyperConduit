@@ -24,7 +24,7 @@ public final class SidecarErrorText {
         }
         return switch (code) {
             case "listener_port_required" -> PREFIX + "仅隧道模式需要固定的对外端口，请先设置端口。";
-            case "listener_failed" -> PREFIX + "无法启动服务器隧道监听，请检查端口与服务器配置。";
+            case "listener_failed" -> PREFIX + "隧道程序启动失败。\n原因：无法启动服务器隧道监听，请检查端口与服务器配置。";
             case "identity_changed" -> PREFIX + "服务器身份已变更，连接已中止；请确认后重新信任该服务器。";
             case "authentication" -> PREFIX + "认证失败，请检查客户端与服务器口令是否一致。";
             case "timeout", "startup_timeout", "ready_timeout" ->
@@ -33,7 +33,7 @@ public final class SidecarErrorText {
             case "binary_invalid" -> PREFIX + "隧道程序校验失败或已损坏，请重新安装模组。";
             case "config_unavailable" -> PREFIX + "无法读取隧道配置，请检查配置文件权限。";
             case "unsupported_platform" -> PREFIX + "当前系统或处理器架构不受支持，无法启动隧道程序。";
-            case "launch_failed" -> PREFIX + "无法启动隧道进程，请检查系统权限或安全软件。";
+            case "launch_failed" -> PREFIX + "隧道程序启动失败。\n原因：无法启动隧道进程，请检查系统权限或安全软件。";
             case "config" -> PREFIX + "隧道配置无效，请检查设置。";
             case "tls" -> PREFIX + "安全连接建立失败。";
             case "storage" -> PREFIX + "无法访问本地存储，请检查磁盘权限。";

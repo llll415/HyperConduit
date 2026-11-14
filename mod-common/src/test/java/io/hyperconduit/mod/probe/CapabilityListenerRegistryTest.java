@@ -123,4 +123,55 @@ class CapabilityListenerRegistryTest {
         assertEquals(Capability.UNKNOWN, declaration.state(), "mixed token policy must not pick one listener");
         assertFalse(declaration.compatible());
     }
+
+    @Test void controlledRestartReplacesOnlyThatListenersPolicyAfterReady() {
+        var registry = new CapabilityListenerRegistry();
+        var handle = registry.add(null, false, true);
+        handle.observeSidecar(() -> true);
+
+        var before = registry.declaration();
+        assertEquals(Capability.ENABLED, before.state());
+        assertFalse(before.disableBrutal());
+        assertTrue(before.tokenRequired());
+
+        // The controller calls this only after the replacement process reached READY.
+        handle.policy(true, false);
+        var after = registry.declaration();
+        assertEquals(Capability.ENABLED, after.state());
+        assertTrue(after.disableBrutal());
+        assertFalse(after.tokenRequired());
+        assertTrue(after.policyComplete());
+    }
+
+    @Test void policyRefreshOnOneListenerMakesAggregateUnknownUntilAllAgree() {
+        var registry = new CapabilityListenerRegistry();
+        var first = registry.add(null, false, true);
+        var second = registry.add(null, false, true);
+        first.observeSidecar(() -> true);
+        second.observeSidecar(() -> true);
+        assertEquals(Capability.ENABLED, registry.declaration().state());
+
+        first.policy(true, false);
+        assertEquals(Capability.UNKNOWN, registry.declaration().state(),
+                "one restarted listener must not overwrite the other listener's live policy");
+
+        second.policy(true, false);
+        var converged = registry.declaration();
+        assertEquals(Capability.ENABLED, converged.state());
+        assertTrue(converged.disableBrutal());
+        assertFalse(converged.tokenRequired());
+    }
+
+    @Test void policyRefreshCannotReviveAClearedRegistry() {
+        var registry = new CapabilityListenerRegistry();
+        var handle = registry.add(null, false, true);
+        handle.observeSidecar(() -> true);
+        registry.clear();
+        handle.policy(true, true);
+        handle.sidecarAlive(true);
+
+        var declaration = registry.declaration();
+        assertEquals(Capability.DISABLED, declaration.state());
+        assertFalse(declaration.tcpAllowed());
+    }
 }

@@ -2,6 +2,7 @@ package io.hyperconduit.mod.config;
 
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
+import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import com.google.gson.stream.JsonReader;
 import com.google.gson.stream.JsonToken;
@@ -33,6 +34,8 @@ import java.nio.file.attribute.PosixFileAttributeView;
 import java.nio.file.attribute.PosixFilePermission;
 import java.nio.file.attribute.PosixFilePermissions;
 import java.nio.file.attribute.UserPrincipal;
+import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.EnumSet;
 import java.util.HashSet;
 import java.util.List;
@@ -63,6 +66,7 @@ public final class HyperConduitConfig {
     private static final int MAX_CONNECT_TIMEOUT_MS = 120_000;
     private static final int MIN_MAX_CONNECTIONS = 1;
     private static final int MAX_MAX_CONNECTIONS = 4096;
+    private static final int MAX_PROXY_PROTOCOL_SOURCES = 128;
 
     private static final Gson GSON = new GsonBuilder().setPrettyPrinting().create();
 
@@ -89,6 +93,17 @@ public final class HyperConduitConfig {
     public int connectTimeoutMs = 5000;
     /** Maximum number of concurrent connections. */
     public int maxConnections = 64;
+    /**
+     * When true, the host accepts a Proxy Protocol v2 header from the sources listed in
+     * {@link #proxyProtocolTrustedSources}. Disabled by default so no peer address is trusted.
+     */
+    public boolean proxyProtocolV2 = false;
+    /**
+     * Literal IP addresses or CIDR ranges allowed to send a Proxy Protocol v2 header. Hostnames
+     * and IPv6 zone identifiers are never accepted or resolved. Empty means no source is trusted;
+     * at most 128 entries are allowed.
+     */
+    public List<String> proxyProtocolTrustedSources = new ArrayList<>();
 
     /** Returns an independent copy of this configuration, including token values. */
     public HyperConduitConfig copy() {
@@ -103,6 +118,10 @@ public final class HyperConduitConfig {
         copy.serverToken = serverToken;
         copy.connectTimeoutMs = connectTimeoutMs;
         copy.maxConnections = maxConnections;
+        copy.proxyProtocolV2 = proxyProtocolV2;
+        copy.proxyProtocolTrustedSources = proxyProtocolTrustedSources == null
+                ? null
+                : new ArrayList<>(proxyProtocolTrustedSources);
         return copy;
     }
 
@@ -198,11 +217,238 @@ public final class HyperConduitConfig {
         validateToken(serverToken, "config_server_token");
         checkRange(connectTimeoutMs, MIN_CONNECT_TIMEOUT_MS, MAX_CONNECT_TIMEOUT_MS, "config_connect_timeout");
         checkRange(maxConnections, MIN_MAX_CONNECTIONS, MAX_MAX_CONNECTIONS, "config_max_connections");
+        validateProxyProtocol();
+    }
+
+    private void validateProxyProtocol() {
+        List<String> sources = proxyProtocolTrustedSources;
+        if (sources == null) {
+            throw new IllegalStateException("config_proxy_protocol_source");
+        }
+        if (sources.size() > MAX_PROXY_PROTOCOL_SOURCES) {
+            throw new IllegalStateException("config_proxy_protocol_sources_limit");
+        }
+        for (String source : sources) {
+            if (!isIpOrCidr(source)) {
+                throw new IllegalStateException("config_proxy_protocol_source");
+            }
+        }
+        if (proxyProtocolV2 && sources.isEmpty()) {
+            throw new IllegalStateException("config_proxy_protocol_sources_required");
+        }
+    }
+
+    /**
+     * Accepts only literal IPv4/IPv6 addresses and CIDR ranges. Hostnames are never resolved and
+     * IPv6 zone identifiers, unspecified addresses and IPv4-mapped IPv6 forms are rejected, matching
+     * the sidecar's {@code netip}-based validation. For CIDR entries the network address is computed
+     * before the checks: a range whose masked address is unspecified (for example
+     * {@code 0.0.0.1/8} or {@code 1.2.3.4/0}) is rejected, while the original spelling is kept for
+     * saving. Parsing is done here instead of being handed to {@link java.net.InetAddress}, because
+     * that API performs DNS lookups for anything it does not recognise as a literal.
+     */
+    private static boolean isIpOrCidr(String value) {
+        if (value == null || value.isEmpty() || !value.equals(value.strip())) {
+            return false;
+        }
+        int slash = value.indexOf('/');
+        if (slash < 0) {
+            return isAllowedIpv4(value) || isAllowedIpv6(value);
+        }
+        if (value.indexOf('/', slash + 1) >= 0) {
+            return false;
+        }
+        String address = value.substring(0, slash);
+        String prefix = value.substring(slash + 1);
+        if (!prefix.matches("0|[1-9][0-9]{0,2}")) {
+            return false;
+        }
+        int bits;
+        try {
+            bits = Integer.parseInt(prefix);
+        } catch (NumberFormatException e) {
+            return false;
+        }
+        if (ipv4Octets(address) != null) {
+            return isAllowedIpv4Cidr(address, bits);
+        }
+        int[] groups = ipv6Groups(address);
+        return groups != null && isAllowedIpv6Cidr(groups, bits);
+    }
+
+    /**
+     * Validates a CIDR after masking its address. {@code /0} is always rejected, as is any range
+     * whose network address is unspecified (for example {@code 0.0.0.1/8}).
+     */
+    private static boolean isAllowedIpv4Cidr(String value, int bits) {
+        if (bits <= 0 || bits > 32) {
+            return false;
+        }
+        int[] octets = ipv4Octets(value);
+        if (octets == null) {
+            return false;
+        }
+        int address = (octets[0] << 24) | (octets[1] << 16) | (octets[2] << 8) | octets[3];
+        int mask = 0xFFFFFFFF << (32 - bits);
+        return (address & mask) != 0;
+    }
+
+    /** Validates an IPv6 CIDR after masking; {@code /0} and unspecified networks are rejected. */
+    private static boolean isAllowedIpv6Cidr(int[] groups, int bits) {
+        if (bits <= 0 || bits > 128) {
+            return false;
+        }
+        int[] network = new int[8];
+        int full = bits / 16;
+        int remainder = bits % 16;
+        for (int i = 0; i < 8; i++) {
+            if (i < full) {
+                network[i] = groups[i];
+            } else if (i == full && remainder > 0) {
+                network[i] = groups[i] & (0xFFFF << (16 - remainder)) & 0xFFFF;
+            }
+        }
+        return isAllowedIpv6(network);
+    }
+
+    private static boolean isAllowedIpv4(String value) {
+        int[] octets = ipv4Octets(value);
+        return octets != null && (octets[0] | octets[1] | octets[2] | octets[3]) != 0;
+    }
+
+    private static boolean isAllowedIpv6(String value) {
+        int[] groups = ipv6Groups(value);
+        return groups != null && isAllowedIpv6(groups);
+    }
+
+    private static boolean isAllowedIpv6(int[] groups) {
+        // Reject "::" and the IPv4-mapped ::ffff:0:0/96 block: a mapped address would widen the
+        // trusted source to an IPv4 form the sidecar does not treat as a literal source.
+        boolean allZero = true;
+        for (int group : groups) {
+            if (group != 0) {
+                allZero = false;
+                break;
+            }
+        }
+        if (allZero) {
+            return false;
+        }
+        for (int i = 0; i < 5; i++) {
+            if (groups[i] != 0) {
+                return true;
+            }
+        }
+        return groups[5] != 0xffff;
+    }
+
+    private static int[] ipv4Octets(String value) {
+        String[] parts = value.split("\\.", -1);
+        if (parts.length != 4) {
+            return null;
+        }
+        int[] octets = new int[4];
+        for (int i = 0; i < 4; i++) {
+            if (!parts[i].matches("0|[1-9][0-9]{0,2}")) {
+                return null;
+            }
+            int octet = Integer.parseInt(parts[i]);
+            if (octet > 255) {
+                return null;
+            }
+            octets[i] = octet;
+        }
+        return octets;
+    }
+
+    private static int[] ipv4Groups(String value) {
+        int[] octets = ipv4Octets(value);
+        if (octets == null) {
+            return null;
+        }
+        return new int[] {(octets[0] << 8) | octets[1], (octets[2] << 8) | octets[3]};
+    }
+
+    /** Returns the eight 16-bit groups of a literal IPv6 address, or {@code null}. */
+    private static int[] ipv6Groups(String value) {
+        if (value.indexOf(':') < 0 || value.indexOf('%') >= 0) {
+            return null;
+        }
+        int compression = value.indexOf("::");
+        if (compression >= 0 && value.indexOf("::", compression + 1) >= 0) {
+            return null;
+        }
+        if (compression < 0) {
+            int[] groups = parseIpv6Part(value);
+            return groups != null && groups.length == 8 ? groups : null;
+        }
+        int[] head = parseIpv6Part(value.substring(0, compression));
+        int[] tail = parseIpv6Part(value.substring(compression + 2));
+        if (head == null || tail == null || head.length + tail.length > 7) {
+            return null;
+        }
+        // An embedded IPv4 address is only valid as the final element, so it cannot sit in the
+        // part before "::".
+        if (value.substring(0, compression).indexOf('.') >= 0) {
+            return null;
+        }
+        int[] groups = new int[8];
+        System.arraycopy(head, 0, groups, 0, head.length);
+        System.arraycopy(tail, 0, groups, 8 - tail.length, tail.length);
+        return groups;
+    }
+
+    /** Parses colon-separated groups; the last one may be an embedded IPv4 address. */
+    private static int[] parseIpv6Part(String part) {
+        if (part.isEmpty()) {
+            return new int[0];
+        }
+        String[] pieces = part.split(":", -1);
+        int[] groups = new int[pieces.length + 1];
+        int count = 0;
+        for (int i = 0; i < pieces.length; i++) {
+            String piece = pieces[i];
+            if (piece.isEmpty()) {
+                return null;
+            }
+            if (i == pieces.length - 1 && piece.indexOf('.') >= 0) {
+                int[] embedded = ipv4Groups(piece);
+                if (embedded == null) {
+                    return null;
+                }
+                groups[count++] = embedded[0];
+                groups[count++] = embedded[1];
+                continue;
+            }
+            if (piece.length() > 4) {
+                return null;
+            }
+            int group = 0;
+            for (int c = 0; c < piece.length(); c++) {
+                char ch = piece.charAt(c);
+                int digit;
+                if (ch >= '0' && ch <= '9') {
+                    digit = ch - '0';
+                } else if (ch >= 'a' && ch <= 'f') {
+                    digit = ch - 'a' + 10;
+                } else if (ch >= 'A' && ch <= 'F') {
+                    digit = ch - 'A' + 10;
+                } else {
+                    return null;
+                }
+                group = (group << 4) | digit;
+            }
+            groups[count++] = group;
+        }
+        return Arrays.copyOf(groups, count);
     }
 
     private void normalize() {
         if (congestion != null) {
             congestion = congestion.toLowerCase(Locale.ROOT);
+        }
+        if (proxyProtocolTrustedSources != null) {
+            proxyProtocolTrustedSources = new ArrayList<>(proxyProtocolTrustedSources);
         }
     }
 
@@ -257,6 +503,9 @@ public final class HyperConduitConfig {
                     case "serverToken" -> config.serverToken = readString(reader);
                     case "connectTimeoutMs" -> config.connectTimeoutMs = readInt(reader);
                     case "maxConnections" -> config.maxConnections = readInt(reader);
+                    case "proxyProtocolV2" -> config.proxyProtocolV2 = readBoolean(reader);
+                    case "proxyProtocolTrustedSources" ->
+                            config.proxyProtocolTrustedSources = readStringArray(reader);
                     default -> throw new StrictConfigException("config_unknown_field");
                 }
             }
@@ -303,6 +552,22 @@ public final class HyperConduitConfig {
         return reader.nextString();
     }
 
+    private static List<String> readStringArray(JsonReader reader) throws IOException {
+        if (reader.peek() != JsonToken.BEGIN_ARRAY) {
+            throw new StrictConfigException("config_invalid");
+        }
+        List<String> values = new ArrayList<>();
+        reader.beginArray();
+        while (reader.hasNext()) {
+            if (reader.peek() != JsonToken.STRING) {
+                throw new StrictConfigException("config_invalid");
+            }
+            values.add(reader.nextString());
+        }
+        reader.endArray();
+        return values;
+    }
+
     private static final class StrictConfigException extends IllegalStateException {
         StrictConfigException(String code) {
             super(code);
@@ -333,6 +598,12 @@ public final class HyperConduitConfig {
         json.addProperty("serverToken", serverToken);
         json.addProperty("connectTimeoutMs", connectTimeoutMs);
         json.addProperty("maxConnections", maxConnections);
+        json.addProperty("proxyProtocolV2", proxyProtocolV2);
+        JsonArray sources = new JsonArray();
+        for (String source : proxyProtocolTrustedSources) {
+            sources.add(source);
+        }
+        json.add("proxyProtocolTrustedSources", sources);
         return GSON.toJson(json).getBytes(StandardCharsets.UTF_8);
     }
 
@@ -468,7 +739,8 @@ public final class HyperConduitConfig {
     public String toString() {
         return "HyperConduitConfig{enabled=" + enabled + ", congestion='" + congestion
                 + "', clientTokenSet=" + !clientToken.isEmpty()
-                + ", serverTokenSet=" + !serverToken.isEmpty() + '}';
+                + ", serverTokenSet=" + !serverToken.isEmpty()
+                + ", proxyProtocolV2=" + proxyProtocolV2 + '}';
     }
 
     @Override
@@ -486,14 +758,17 @@ public final class HyperConduitConfig {
                 && disableVanillaTcp == that.disableVanillaTcp
                 && connectTimeoutMs == that.connectTimeoutMs
                 && maxConnections == that.maxConnections
+                && proxyProtocolV2 == that.proxyProtocolV2
                 && Objects.equals(congestion, that.congestion)
                 && Objects.equals(clientToken, that.clientToken)
-                && Objects.equals(serverToken, that.serverToken);
+                && Objects.equals(serverToken, that.serverToken)
+                && Objects.equals(proxyProtocolTrustedSources, that.proxyProtocolTrustedSources);
     }
 
     @Override
     public int hashCode() {
         return Objects.hash(enabled, upMbps, downMbps, congestion, disableBrutal, disableVanillaTcp,
-                clientToken, serverToken, connectTimeoutMs, maxConnections);
+                clientToken, serverToken, connectTimeoutMs, maxConnections, proxyProtocolV2,
+                proxyProtocolTrustedSources);
     }
 }

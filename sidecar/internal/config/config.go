@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/netip"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -24,6 +25,10 @@ const (
 	maxConfigBytes   = 64 << 10
 	maxTokenBytes    = 1024
 	maxBandwidthMbps = 1_000_000
+
+	// maxProxyProtocolTrustedSources bounds the allow-list so a configuration
+	// cannot force an unbounded per-connection source scan.
+	maxProxyProtocolTrustedSources = 128
 
 	defaultListen           = "127.0.0.1:0"
 	defaultCongestion       = "bbr"
@@ -65,10 +70,25 @@ type Config struct {
 	RequestTimeoutMS int   `json:"requestTimeoutMs"`
 	IdleTimeoutMS    int   `json:"idleTimeoutMs"`
 
+	// ProxyProtocolV2 is a server-only switch that makes the public listener
+	// consume a PROXY protocol v2 header from the peers listed in
+	// ProxyProtocolTrustedSources. It is disabled by default, so no peer address
+	// is ever trusted.
+	ProxyProtocolV2 bool `json:"proxyProtocolV2"`
+	// ProxyProtocolTrustedSources is the server-only allow-list of literal IP
+	// addresses and CIDR ranges permitted to send a PROXY protocol v2 header.
+	// Hostnames are never resolved or accepted. An empty list trusts nobody.
+	ProxyProtocolTrustedSources []string `json:"proxyProtocolTrustedSources"`
+
 	// tcpAllowedPresent records whether the on-disk JSON contained the server-only
 	// tcpAllowed key. Client mode rejects its presence even when the value is false,
 	// so a server-only field is never silently accepted by a client config.
 	tcpAllowedPresent bool
+	// proxyProtocolV2Present and proxyProtocolTrustedSourcesPresent record whether
+	// the on-disk JSON contained the corresponding server-only key. Client mode
+	// rejects their presence even when the values are false or an empty array.
+	proxyProtocolV2Present             bool
+	proxyProtocolTrustedSourcesPresent bool
 }
 
 // Load reads a strict JSON configuration file, applies defaults, and validates
@@ -104,6 +124,8 @@ func Load(path, mode string) (Config, error) {
 		return Config{}, describeJSONError(err)
 	}
 	_, cfg.tcpAllowedPresent = present["tcpAllowed"]
+	_, cfg.proxyProtocolV2Present = present["proxyProtocolV2"]
+	_, cfg.proxyProtocolTrustedSourcesPresent = present["proxyProtocolTrustedSources"]
 
 	return cfg.Normalize(mode)
 }
@@ -193,6 +215,12 @@ func (c Config) normalizeClient() (Config, error) {
 	if c.tcpAllowedPresent || c.TCPAllowed {
 		return Config{}, errors.New("tcpAllowed: only available in server mode")
 	}
+	if c.proxyProtocolV2Present || c.ProxyProtocolV2 {
+		return Config{}, errors.New("proxyProtocolV2: only available in server mode")
+	}
+	if c.proxyProtocolTrustedSourcesPresent || c.ProxyProtocolTrustedSources != nil {
+		return Config{}, errors.New("proxyProtocolTrustedSources: only available in server mode")
+	}
 
 	return c, nil
 }
@@ -243,6 +271,15 @@ func (c Config) normalizeServer() (Config, error) {
 	if c.ServerName != "" {
 		return Config{}, errors.New("serverName: must be empty in server mode")
 	}
+
+	sources, err := normalizeProxyProtocolSources(c.ProxyProtocolTrustedSources)
+	if err != nil {
+		return Config{}, err
+	}
+	if c.ProxyProtocolV2 && len(sources) == 0 {
+		return Config{}, errors.New("proxyProtocolTrustedSources: required when proxyProtocolV2 is enabled")
+	}
+	c.ProxyProtocolTrustedSources = sources
 
 	return c, nil
 }
@@ -362,6 +399,97 @@ func validateDialAddress(field, addr string) error {
 	}
 	if ip := net.ParseIP(host); ip != nil && ip.IsUnspecified() {
 		return fmt.Errorf("%s: host must not be a wildcard address", field)
+	}
+	return nil
+}
+
+// normalizeProxyProtocolSources validates the PROXY protocol v2 allow-list and
+// returns it in canonical form. Every entry must be a literal IPv4/IPv6 address
+// or CIDR range: hostnames are never resolved, and zoned, IPv4-mapped, and
+// unspecified addresses are rejected so a trusted source can never widen to
+// "everything". CIDR entries are masked before that check, so a prefix whose
+// network collapses to an unspecified address is rejected instead of being
+// accepted once and refused on the next load. Loopback literals are accepted.
+// Duplicate entries are dropped after canonicalization. Error messages name only
+// the field and reason; entry values are never echoed.
+func normalizeProxyProtocolSources(sources []string) ([]string, error) {
+	if len(sources) > maxProxyProtocolTrustedSources {
+		return nil, fmt.Errorf(
+			"proxyProtocolTrustedSources: must contain at most %d entries",
+			maxProxyProtocolTrustedSources,
+		)
+	}
+	if len(sources) == 0 {
+		return nil, nil
+	}
+
+	canonical := make([]string, 0, len(sources))
+	seen := make(map[string]struct{}, len(sources))
+	for _, source := range sources {
+		entry, err := canonicalTrustedSource(source)
+		if err != nil {
+			return nil, err
+		}
+		if _, ok := seen[entry]; ok {
+			continue
+		}
+		seen[entry] = struct{}{}
+		canonical = append(canonical, entry)
+	}
+	return canonical, nil
+}
+
+// canonicalTrustedSource parses one allow-list entry without any DNS lookup.
+// netip parsing is deliberately used instead of net.ParseIP/net.ParseCIDR:
+// netip rejects hostnames, leading-zero IPv4 octets, and non-literal forms.
+//
+// CIDR entries are masked before the address is validated. Validating the
+// unmasked address first would accept e.g. "1.2.3.4/0", canonicalize it to
+// "0.0.0.0/0", and then reject that saved value on the next load. Masking first
+// keeps normalization idempotent and rejects any network that collapses to an
+// unspecified address.
+func canonicalTrustedSource(source string) (string, error) {
+	const field = "proxyProtocolTrustedSources"
+
+	if source == "" || strings.TrimSpace(source) != source {
+		return "", fmt.Errorf("%s: entries must be literal IP addresses or CIDR ranges", field)
+	}
+
+	if strings.Contains(source, "/") {
+		prefix, err := netip.ParsePrefix(source)
+		if err != nil {
+			return "", fmt.Errorf("%s: entry is not a valid CIDR range", field)
+		}
+		masked := prefix.Masked()
+		if err := validateTrustedAddr(masked.Addr()); err != nil {
+			return "", err
+		}
+		return masked.String(), nil
+	}
+
+	addr, err := netip.ParseAddr(source)
+	if err != nil {
+		return "", fmt.Errorf("%s: entry is not a valid IP address", field)
+	}
+	if err := validateTrustedAddr(addr); err != nil {
+		return "", err
+	}
+	return addr.String(), nil
+}
+
+// validateTrustedAddr rejects address forms that would make a trusted source
+// ambiguous or unbounded.
+func validateTrustedAddr(addr netip.Addr) error {
+	const field = "proxyProtocolTrustedSources"
+
+	if addr.Zone() != "" {
+		return fmt.Errorf("%s: entries must not carry an IPv6 zone", field)
+	}
+	if addr.Is4In6() {
+		return fmt.Errorf("%s: entries must not use an IPv4-mapped IPv6 address", field)
+	}
+	if addr.IsUnspecified() {
+		return fmt.Errorf("%s: entries must not be an unspecified address", field)
 	}
 	return nil
 }

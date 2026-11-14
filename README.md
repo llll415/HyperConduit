@@ -136,7 +136,9 @@ Brutal 的“目标速率”是协商后的基础值，丢包补偿可能让实�
   "clientToken": "",
   "serverToken": "",
   "connectTimeoutMs": 5000,
-  "maxConnections": 64
+  "maxConnections": 64,
+  "proxyProtocolV2": false,
+  "proxyProtocolTrustedSources": []
 }
 ```
 
@@ -150,6 +152,8 @@ Brutal 的“目标速率”是协商后的基础值，丢包补偿可能让实�
 | `clientToken` / `serverToken` | 可选的访问口令。 |
 | `connectTimeoutMs` | 建立隧道、连接后端的超时，`100–120000` 毫秒。 |
 | `maxConnections` | 隧道连接数上限，`1–4096`。 |
+| `proxyProtocolV2` | 主机是否接收 Proxy Protocol v2，默认关闭，重启隧道程序后生效。 |
+| `proxyProtocolTrustedSources` | 可信转发端的 IP/CIDR 数组，最多 128 条；开启接收支持时不能为空。 |
 
 读取很严格：不接受注释、重复或未知字段、错误的类型或非整数的数字。文件无效时 Mod 启动阶段就会报错，而不是悄悄使用默认值。设置界面里未填的数值会回到默认值。
 
@@ -197,8 +201,39 @@ Brutal 的“目标速率”是协商后的基础值，丢包补偿可能让实�
 
 - 控制器名称（`BBR` / `RENO` / `BRUTAL`）是**本端实际使用的发送控制器**。
 - RTT 和速率来自本端的 QUIC 统计。速率包含重传和协议开销，不含外层 UDP/IP 报头。
-- 第一行是服务端当前保存的配置；保存后、重新开放监听前，它可能与正在运行的策略不同。
+- 第一行来自隧道程序的实际运行配置，不是磁盘中尚未应用的设置。
 - 总计行的"本地"是指单人世界或局域网房主自身的内存连接（MemoryConnection），不经过网络。单人世界的 `F3` 显示的是内置服务端的状态。
+
+### 隧道程序管理
+
+管理员可使用以下命令管理本服启动的隧道程序：
+
+```text
+/hyperconduit tunnel status
+/hyperconduit tunnel restart
+/hyperconduit tunnel config
+/hyperconduit tunnel config <配置项>
+/hyperconduit tunnel config <配置项> <值>
+/hyperconduit tunnel proxyprotocol on|off
+```
+
+`status` 显示进程状态、PID、运行时间、工作集内存、CPU 和实际生效的 Proxy Protocol v2 开关。CPU 按全部可用逻辑处理器占满为 100% 统计；无法获取的指标显示“不可用”。
+
+配置命令支持 `upMbps`、`downMbps`、`congestion`、`disableBrutal`、`serverToken`、`connectTimeoutMs`、`maxConnections`、`proxyProtocolV2` 和 `proxyProtocolTrustedSources`。可信来源用逗号分隔的 IP/CIDR 设置；口令和可信来源可使用 `clear` 清空，但接收支持开启时不能清空可信来源。口令查询不显示明文，但输入命令仍可能被服务端或插件记录。
+
+修改只保存，不自动重启。`restart` 从磁盘读取并校验新配置后重启隧道程序，会断开所有 HyperConduit 玩家，原版 TCP 连接不受影响；未运行时只提示，不启动。`disableVanillaTcp` 等 Java 监听设置仍需重启 Minecraft 服务端。
+
+配置不再使用全局内存缓存：打开界面和执行配置命令时读盘，连接和进程启动后保留各自的配置快照。界面保存前检查外部修改，检测到冲突时拒绝覆盖。
+
+### FRP 与 Proxy Protocol v2
+
+`proxyProtocolV2` 默认关闭。开启前先将 FRP 转发端连接 HC 时的来源 IP/CIDR 填入 `proxyProtocolTrustedSources`（最多 128 条，不支持域名或信任全部地址），再执行重启命令应用。
+
+此功能只作用于 HC 的 UDP/QUIC 入口，不为原版 TCP 增加协议头解析。仅接受可信转发来源的数据，新转发会话必须提供合法的 Proxy Protocol v2 头部；普通 QUIC 直连不能接入。它同时兼容逐包带头，以及新版 FRP 的首包带头、后续按已建立地址映射接收的方式。回复仍经 FRP 返回，不直接发送给声明的玩家地址。
+
+Proxy Protocol v2 本身不提供身份认证，应配合回环/私网绑定和防火墙限制转发来源。首包丢失、地址映射失效或隧道程序重启后，需要 FRP 重新建立转发会话并发送带头首包。异常数据仅写入限频日志，包含实际来源、可解析的未验证声明地址及拒绝原因，不发送到聊天。
+
+以上新增能力尚未运行构建、自动化测试或真实 FRP 联调，不能视为已通过下方历史测试记录。
 
 ## 已知限制
 
@@ -207,7 +242,7 @@ Brutal 的“目标速率”是协商后的基础值，丢包补偿可能让实�
 - 客户端每次联机、服务端每个监听器都会启动一个本机子进程。安全软件阻止它运行时，会提示"无法启动隧道进程"。
 - 兼容性只验证过原生 NeoForge 专用服和基于 Paper 的 Youer。如果第三方插件绕过 Minecraft 的 `Connection`，直接读取底层 Netty 通道地址，看到的会是 `127.0.0.1`，不是玩家真实地址。
 - 双方需要使用互相兼容的版本。目前没有版本号校验，建议两端使用同一个 jar。
-- 修改配置后未重启监听时，对外声明可能与实际生效的策略不符。如果服务端安装了多端口监听类 Mod 且不同监听器的口令或 Brutal 策略不一致，对外声明会变成"未知"。
+- 对外声明反映实际运行的监听策略。如果服务端安装了多端口监听类 Mod 且不同监听器的口令或 Brutal 策略不一致，对外声明会变成"未知"。
 
 ## 测试记录
 

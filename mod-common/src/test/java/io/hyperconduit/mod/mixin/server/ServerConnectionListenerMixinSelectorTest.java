@@ -1,6 +1,7 @@
 package io.hyperconduit.mod.mixin.server;
 
 import io.netty.bootstrap.ServerBootstrap;
+import io.hyperconduit.mod.probe.TunnelListenerState;
 import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.Test;
 import org.objectweb.asm.AnnotationVisitor;
@@ -75,6 +76,19 @@ class ServerConnectionListenerMixinSelectorTest {
     void vanillaFixtureHasCallSiteOnlyInStartTcpServerListener() {
         assertEquals(1, bindCalls(VanillaFixture.class, "startTcpServerListener", START_DESCRIPTOR));
         assertEquals(0, bindCalls(VanillaFixture.class, "bind", BIND_DESCRIPTOR));
+    }
+
+    @Test
+    void mixinExposesPerListenerControllersAndStopsThem() throws Exception {
+        assertTrue(TunnelListenerState.class.isAssignableFrom(ServerConnectionListenerMixin.class),
+                "commands must be able to reach the per-listener controllers");
+        Method controllers = ServerConnectionListenerMixin.class.getDeclaredMethod("hyperconduit$controllers");
+        assertTrue(java.lang.reflect.Modifier.isPublic(controllers.getModifiers()));
+
+        assertTrue(callsMethod(readClass(ServerConnectionListenerMixin.class), "hyperconduit$stop",
+                        "(Lorg/spongepowered/asm/mixin/injection/callback/CallbackInfo;)V",
+                        "io/hyperconduit/mod/bridge/ServerTunnelController", "close", "()V"),
+                "the listener stop hook must close every controller");
     }
 
     @Test

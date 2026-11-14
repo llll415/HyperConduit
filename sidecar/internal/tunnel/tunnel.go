@@ -106,6 +106,15 @@ func openServer(parent context.Context, raw config.Config) (*Endpoint, error) {
 		cancel()
 		return nil, err
 	}
+	if c.ProxyProtocolV2 {
+		wrapped, wrapErr := newProxyPacketConn(pc, c.ProxyProtocolTrustedSources, c.MaxConnections)
+		if wrapErr != nil {
+			cancel()
+			_ = pc.Close()
+			return nil, &Error{Code: CodeConfig, Op: "proxy_protocol", Err: wrapErr}
+		}
+		pc = wrapped
+	}
 	conns := newConnSet(c.MaxConnections)
 	status := newStatusStore()
 	serverTLS := server.TLSConfig{Certificates: []tls.Certificate{cert}}
@@ -117,6 +126,8 @@ func openServer(parent context.Context, raw config.Config) (*Endpoint, error) {
 		Conn:      pc,
 		TLSConfig: serverTLS,
 		QUICConfig: server.QUICConfig{
+			// Proxy framing is consumed by a plain PacketConn adapter, not UDP OOB/GSO.
+			DisableGSO:                 c.ProxyProtocolV2,
 			InitialStreamReceiveWindow: 256 * 1024, MaxStreamReceiveWindow: 4 * 1024 * 1024,
 			InitialConnectionReceiveWindow: 512 * 1024, MaxConnectionReceiveWindow: 8 * 1024 * 1024,
 			MaxIdleTimeout: time.Duration(c.IdleTimeoutMS) * time.Millisecond, MaxIncomingStreams: c.MaxStreams,

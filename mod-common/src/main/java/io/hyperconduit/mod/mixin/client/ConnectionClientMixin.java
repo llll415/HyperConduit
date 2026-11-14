@@ -6,6 +6,7 @@ import io.hyperconduit.mod.bridge.ConnectionAttemptScope;
 import io.hyperconduit.mod.bridge.ResolvedEndpoint;
 import io.hyperconduit.mod.config.ConfigHolder;
 import io.hyperconduit.mod.config.HyperConduitConfig;
+import io.hyperconduit.mod.probe.StatusProbeScope;
 import io.netty.bootstrap.AbstractBootstrap;
 import io.netty.bootstrap.Bootstrap;
 import io.netty.channel.ChannelHandler;
@@ -31,9 +32,11 @@ public abstract class ConnectionClientMixin {
             at = @At(value = "INVOKE", target = "Lio/netty/bootstrap/Bootstrap;handler(Lio/netty/channel/ChannelHandler;)Lio/netty/bootstrap/AbstractBootstrap;"))
     private static AbstractBootstrap hyperconduit$wrapInitializer(Bootstrap bootstrap, ChannelHandler initializer,
                                                                   InetSocketAddress target, boolean epoll, Connection connection) {
+        // Status pings are pure vanilla traffic and must not touch the config file.
+        if (StatusProbeScope.active()) return bootstrap.handler(initializer);
         HyperConduitConfig config = ConnectionAttemptScope.snapshot();
-        if (config == null) config = ConfigHolder.get();
-        if (config == null || !config.enabled || io.hyperconduit.mod.probe.StatusProbeScope.active()) return bootstrap.handler(initializer);
+        if (config == null) config = ConfigHolder.getForConnection();
+        if (!config.enabled) return bootstrap.handler(initializer);
         String endpoint = ((ConnectionIdentity) connection).hyperconduit$endpoint();
         return bootstrap.handler(new ClientTunnelInitializer(initializer, config.copy(), endpoint));
     }

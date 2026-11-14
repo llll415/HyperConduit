@@ -83,6 +83,16 @@ public final class ProcessFixture {
                 emitReady("client", "127.0.0.1:12345");
                 awaitShutdown();
             }
+            case "proxyLog" -> {
+                emitProxyLog();
+                emitReady("client", "127.0.0.1:12345");
+                awaitShutdown();
+            }
+            case "proxyLogInvalid" -> {
+                emitProxyLogInvalid();
+                emitReady("client", "127.0.0.1:12345");
+                awaitShutdown();
+            }
             case "tooLong" -> {
                 emitTooLongStdoutLine();
                 awaitShutdown();
@@ -141,6 +151,20 @@ public final class ProcessFixture {
         }
         System.out.write('\n');
         System.out.flush();
+    }
+
+    /** A structurally valid proxy diagnostic; the parent must log it and keep running. */
+    private static void emitProxyLog() {
+        emitError("{\"version\":1,\"event\":\"proxy_log\",\"reason\":\"untrusted_source\","
+                + "\"source\":\"203.0.113.7:54321\",\"client\":\"198.51.100.9:443\","
+                + "\"length\":1200,\"suppressed\":3}");
+    }
+
+    /** A proxy frame with an unknown reason and an arbitrary message that must be ignored. */
+    private static void emitProxyLogInvalid() {
+        emitError("{\"version\":1,\"event\":\"proxy_log\",\"reason\":\"made_up\","
+                + "\"source\":\"not-an-ip\",\"length\":-1,\"suppressed\":-2,"
+                + "\"message\":\"" + SECRET + "\"}");
     }
 
     private static void awaitShutdown() throws IOException {

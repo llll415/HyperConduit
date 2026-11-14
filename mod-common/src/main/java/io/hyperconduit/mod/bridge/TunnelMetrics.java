@@ -7,6 +7,7 @@ import io.netty.channel.Channel;
 import io.netty.channel.ChannelHandler;
 import io.netty.channel.ChannelInitializer;
 import io.netty.util.AttributeKey;
+import io.hyperconduit.mod.config.HyperConduitConfig;
 import java.util.function.Supplier;
 
 /** Each channel selects only its listener's process and authenticated connection ID. */
@@ -14,6 +15,7 @@ public final class TunnelMetrics {
     private TunnelMetrics() {}
     public static final AttributeKey<Supplier<TelemetrySnapshot>> SOURCE = AttributeKey.valueOf("hyperconduit.telemetry");
     public static final AttributeKey<Boolean> CLIENT = AttributeKey.valueOf("hyperconduit.telemetry.client");
+    public static final AttributeKey<HyperConduitConfig> RUNNING_CONFIG = AttributeKey.valueOf("hyperconduit.runningConfig");
 
     public static ChannelHandler serverInitializer(ChannelHandler bridge, java.util.concurrent.atomic.AtomicReference<SidecarProcess> processRef) {
         return new ChannelInitializer<Channel>() {

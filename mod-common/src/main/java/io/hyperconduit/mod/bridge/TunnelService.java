@@ -43,6 +43,8 @@ public final class TunnelService {
         values.put("token", config.serverToken);
         values.put("bridgeToken", bridgeToken);
         values.put("disableBrutal", config.disableBrutal);
+        values.put("proxyProtocolV2", config.proxyProtocolV2);
+        values.put("proxyProtocolTrustedSources", config.proxyProtocolTrustedSources);
         // Snapshot of the public TCP listener at start; the sidecar never re-reads it.
         values.put("tcpAllowed", tcpAllowed);
         return start(config, "server", values);

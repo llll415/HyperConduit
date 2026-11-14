@@ -18,7 +18,8 @@
     "client.ServerEntryMixin",
     "client.MultiplayerDiscoveryMixin",
     "client.ConnectionClientMixin",
-    "client.ConnectScreenTransportMixin"
+    "client.ConnectScreenTransportMixin",
+    "client.IntegratedServerLanFailureMixin"
   ],
   "injectors": {
     "defaultRequire": 1
