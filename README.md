@@ -44,6 +44,7 @@ NeoForge HC 客户端 → QUIC → HC 隧道程序 → TCP + Proxy Protocol v2 �
 
 - 插件通过 Velocity 公开 API 获取游戏监听地址和端口，UDP 使用相同的绑定地址和端口号；TCP 转发目标直接指向 Velocity，通配监听地址转换为对应的本机回环地址。不修改 Velocity 原生 TCP 网络、登录、认证或切服逻辑。
 - 管理员需要在 `velocity.toml` 中启用 `[advanced]` 下的 `haproxy-protocol = true`，并自行配置后端 modern forwarding。插件不会自动修改 Velocity 配置。
+- HC 使用游戏端口的 UDP；如果 Velocity 的 GS4 Query 也使用同一 UDP 端口，需要关闭 Query 或将其改到其他端口，避免端口占用冲突。
 - **Proxy Protocol v2 不是认证协议。** 必须通过监听地址、防火墙或安全组保护 Velocity TCP 入口，只允许可信转发端访问，否则可能被伪造玩家来源 IP。启用该功能的监听不能被当作普通 Minecraft TCP 入口直接使用。
 - `disableVanillaTcp` 在 Velocity 上**不适用、没有作用**；插件不会关闭 Velocity TCP 监听，也不宣称强制实现“仅隧道”。
 - 前置 FRP 的 UDP Proxy Protocol v2 输入直接复用 v1.1.0 实现，默认关闭；它与向 Velocity 发送的 TCP Proxy Protocol v2 输出是两个独立方向。
