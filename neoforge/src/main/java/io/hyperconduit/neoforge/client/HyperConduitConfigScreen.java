@@ -13,9 +13,15 @@ import net.minecraft.network.chat.Style;
 import net.minecraft.util.FormattedCharSequence;
 
 import java.util.function.Consumer;
+import java.util.ArrayList;
+import java.util.List;
 
 /**
  * Compact two-column editor for the HY2 configuration.
+ *
+ * <p>The screen opens by reading the file from disk and keeps two independent copies: {@code base}
+ * is the snapshot used for conflict detection, {@code config} is the edited copy. Saving re-reads
+ * the file and refuses to overwrite it when another process changed it in the meantime.
  *
  * <p>Token fields are intentionally blank on open: an existing token is never rendered in plaintext.
  * Typing a new value replaces it, while leaving the field empty keeps the stored token.
@@ -31,7 +37,9 @@ public final class HyperConduitConfigScreen extends Screen {
     private static final int TOP = 36;
 
     private final Screen parent;
+    private final HyperConduitConfig base;
     private final HyperConduitConfig config;
+    private final String loadError;
 
     private int leftX;
     private int rightX;
@@ -43,13 +51,27 @@ public final class HyperConduitConfigScreen extends Screen {
     private EditBox serverToken;
     private EditBox connectTimeout;
     private EditBox maxConnections;
+    private EditBox proxySources;
     private String errorMessage;
 
     public HyperConduitConfigScreen(Screen parent) {
         super(Component.literal("HyperConduit"));
         this.parent = parent;
-        HyperConduitConfig current = ConfigHolder.get();
-        this.config = current == null ? new HyperConduitConfig() : current.copy();
+        HyperConduitConfig loaded = null;
+        String readError = null;
+        try {
+            loaded = ConfigHolder.get();
+            if (loaded == null) {
+                readError = ERROR_PREFIX + "配置目录尚未初始化，无法读取配置。";
+            }
+        } catch (RuntimeException e) {
+            // Never fall back to defaults silently: that would let a later save overwrite a file
+            // the user (or another tool) is still fixing.
+            readError = friendlyReadError(e.getMessage());
+        }
+        this.base = loaded == null ? new HyperConduitConfig() : loaded.copy();
+        this.config = base.copy();
+        this.loadError = readError;
     }
 
     @Override
@@ -95,9 +117,18 @@ public final class HyperConduitConfigScreen extends Screen {
         addRenderableWidget(disableTcp);
         leftY += ROW;
 
-        addRenderableWidget(Button.builder(Component.literal("已信任服务器…"), button ->
-                        minecraft.setScreen(new KnownServersScreen(this)))
-                .bounds(leftX, leftY, columnWidth, 20).build());
+        Button proxyProtocol = toggleButton(leftX, leftY, columnWidth, "Proxy Protocol v2", config.proxyProtocolV2,
+                value -> config.proxyProtocolV2 = value);
+        proxyProtocol.setTooltip(Tooltip.create(Component.literal("仅主机：接收可信中转传来的玩家 IP")));
+        addRenderableWidget(proxyProtocol);
+        leftY += ROW;
+        proxySources = new EditBox(font, leftX + labelWidth, leftY, fieldWidth, 20,
+                Component.literal("可信来源"));
+        proxySources.setMaxLength(4096);
+        proxySources.setValue(String.join(", ", config.proxyProtocolTrustedSources));
+        proxySources.setHint(Component.literal("IP 或 CIDR，逗号分隔"));
+        proxySources.setTooltip(Tooltip.create(Component.literal("可信转发端的 IP/CIDR，用英文逗号分隔")));
+        addRenderableWidget(proxySources);
 
         int rightY = TOP;
         clientToken = tokenBox(rightX + labelWidth, rightY, fieldWidth, config.clientToken, "客户端口令");
@@ -122,11 +153,16 @@ public final class HyperConduitConfigScreen extends Screen {
         addRenderableWidget(Button.builder(Component.literal("清除服务器口令"), button -> {
             config.serverToken = ""; serverToken.setValue(""); serverToken.setHint(Component.literal("留空不使用"));
         }).bounds(rightX,rightY,columnWidth,20).build());
-
-        int bottom = height - 28;
+        rightY += ROW;
+        addRenderableWidget(Button.builder(Component.literal("已信任服务器…"), button ->
+                        minecraft.setScreen(new KnownServersScreen(this)))
+                .bounds(rightX, rightY, columnWidth, 20).build());
+        int bottom = height - 24;
         int buttonWidth = Math.min(98, (width - 30) / 2);
-        addRenderableWidget(Button.builder(Component.literal("保存"), button -> saveAndClose())
-                .bounds(width / 2 - buttonWidth - 2, bottom, buttonWidth, 20).build());
+        Button save = Button.builder(Component.literal("保存"), button -> saveAndClose())
+                .bounds(width / 2 - buttonWidth - 2, bottom, buttonWidth, 20).build();
+        save.active = loadError == null;
+        addRenderableWidget(save);
         addRenderableWidget(Button.builder(CommonComponents.GUI_CANCEL, button -> onClose())
                 .bounds(width / 2 + 2, bottom, buttonWidth, 20).build());
     }
@@ -136,8 +172,9 @@ public final class HyperConduitConfigScreen extends Screen {
         super.render(graphics, mouseX, mouseY, partialTick);
 
         drawCentered(graphics, title, 10, TITLE_COLOR);
-        if (errorMessage != null) {
-            drawCentered(graphics, Component.literal(errorMessage), 24, ERROR_COLOR);
+        String notice = errorMessage != null ? errorMessage : loadError;
+        if (notice != null) {
+            drawCenteredWrapped(graphics, notice, 24, ERROR_COLOR);
         } else {
             drawCentered(graphics, Component.literal("保存后将在下一次连接或开放局域网时生效"), 24, HINT_COLOR);
         }
@@ -148,10 +185,18 @@ public final class HyperConduitConfigScreen extends Screen {
         drawFieldLabel(graphics, "服务器口令", serverToken);
         drawFieldLabel(graphics, "超时(ms)", connectTimeout);
         drawFieldLabel(graphics, "最大连接", maxConnections);
+        drawFieldLabel(graphics, "可信来源", proxySources);
     }
 
     private void drawCentered(GuiGraphics graphics, Component text, int y, int color) {
         graphics.drawString(font, text, (width - font.width(text)) / 2, y, color, true);
+    }
+
+    private void drawCenteredWrapped(GuiGraphics graphics, String text, int y, int color) {
+        for (FormattedCharSequence line : font.split(Component.literal(text), Math.max(80, width - 16))) {
+            graphics.drawString(font, line, (width - font.width(line)) / 2, y, color, true);
+            y += 9;
+        }
     }
 
     private void drawFieldLabel(GuiGraphics graphics, String text, EditBox box) {
@@ -197,26 +242,43 @@ public final class HyperConduitConfigScreen extends Screen {
     }
 
     private void saveAndClose() {
+        if (loadError != null) {
+            errorMessage = loadError;
+            return;
+        }
         try {
-            config.upMbps = parse(upMbps, 0);
-            config.downMbps = parse(downMbps, 0);
-            config.connectTimeoutMs = parse(connectTimeout, 5000);
-            config.maxConnections = parse(maxConnections, 64);
-
-            String client = clientToken.getValue();
-            if (!client.isEmpty()) {
-                config.clientToken = client;
-            }
-            String server = serverToken.getValue();
-            if (!server.isEmpty()) {
-                config.serverToken = server;
-            }
-
-            ConfigHolder.save(config);
+            applyFields();
+            ConfigHolder.compareAndSave(base, config);
             minecraft.setScreen(parent);
         } catch (RuntimeException e) {
             errorMessage = friendlyError(e.getMessage());
         }
+    }
+
+    private void applyFields() {
+        config.upMbps = parse(upMbps, 0);
+        config.downMbps = parse(downMbps, 0);
+        config.connectTimeoutMs = parse(connectTimeout, 5000);
+        config.maxConnections = parse(maxConnections, 64);
+
+        String client = clientToken.getValue();
+        if (!client.isEmpty()) {
+            config.clientToken = client;
+        }
+        String server = serverToken.getValue();
+        if (!server.isEmpty()) {
+            config.serverToken = server;
+        }
+        config.proxyProtocolTrustedSources = parseSources(proxySources.getValue());
+    }
+
+    private static List<String> parseSources(String text) {
+        List<String> values = new ArrayList<>();
+        for (String part : text.split(",", -1)) {
+            String value = part.trim();
+            if (!value.isEmpty()) values.add(value);
+        }
+        return values;
     }
 
     private static int parse(EditBox box, int fallback) {
@@ -231,6 +293,15 @@ public final class HyperConduitConfigScreen extends Screen {
         }
     }
 
+    private static String friendlyReadError(String code) {
+        String message = switch (code == null ? "" : code) {
+            case "config_too_large" -> "配置文件过大。";
+            case "config_permissions" -> "配置文件权限异常。";
+            default -> "配置文件格式或编码无效。";
+        };
+        return ERROR_PREFIX + message + "已阻止保存以免覆盖。";
+    }
+
     private static String friendlyError(String code) {
         if (code == null) {
             return ERROR_PREFIX + "保存失败，请检查配置。";
@@ -242,6 +313,17 @@ public final class HyperConduitConfigScreen extends Screen {
                     "口令只能包含可打印 ASCII 字符（≤1024，首尾不能为空白）。";
             case "config_connect_timeout" -> "连接超时必须在 100–120000 毫秒之间。";
             case "config_max_connections" -> "最大连接数必须在 1–4096 之间。";
+            case "config_proxy_protocol_source" ->
+                    "可信来源必须是 IP 或 CIDR 字面值（不支持域名），用逗号分隔。";
+            case "config_proxy_protocol_sources_required" ->
+                    "启用 Proxy Protocol v2 时至少需要一个可信来源。";
+            case "config_proxy_protocol_sources_limit" ->
+                    "可信来源最多 128 条。";
+            case "config_conflict" ->
+                    "配置文件已被外部修改，本次保存已取消。请关闭后重新打开设置以载入最新内容。";
+            case "config_read", "config_invalid", "config_duplicate_field", "config_unknown_field" ->
+                    "无法读取配置文件，已阻止保存以免覆盖。";
+            case "HyperConduit config directory is not installed" -> "配置目录尚未初始化，无法保存。";
             case "config_write", "config_directory", "config_permissions" -> "无法安全写入配置文件。";
             case "config_too_large" -> "配置文件过大。";
             default -> "保存失败，请检查配置。";
