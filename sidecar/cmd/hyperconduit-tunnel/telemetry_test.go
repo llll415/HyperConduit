@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
 
@@ -62,7 +63,7 @@ func TestBuildTelemetryFiltersAndSorts(t *testing.T) {
 		{ID: 1, State: "established", Congestion: observe.Congestion{Type: "brutal", TxBytesPerSecond: 123}},
 		{ID: 4, State: "established", Congestion: observe.Congestion{Type: "unknown"}},
 	}
-	event := buildTelemetry(3, 4, snapshots)
+	event := buildTelemetry(3, 4, tunnel.Status{Connections: snapshots})
 	if event.Version != 1 || event.Event != "stats" || event.Sequence != 3 || event.ElapsedNanos != 4 {
 		t.Fatalf("unexpected header: %+v", event)
 	}
@@ -97,7 +98,7 @@ func TestBuildTelemetryBoundsConnections(t *testing.T) {
 			BytesReceived:    math.MaxUint64,
 		}
 	}
-	event := buildTelemetry(7, 8, snapshots)
+	event := buildTelemetry(7, 8, tunnel.Status{Connections: snapshots})
 	if !event.Truncated {
 		t.Fatal("expected truncated stats")
 	}
@@ -123,6 +124,70 @@ func TestBuildTelemetryBoundsConnections(t *testing.T) {
 	assertStatsSchema(t, line)
 }
 
+func TestBuildTelemetryBindingsAreExactAndBounded(t *testing.T) {
+	streamZero := int64(0)
+	streamOne := int64(1)
+	status := tunnel.Status{
+		Connections: []observe.Snapshot{
+			{ID: 5, State: "established", Congestion: observe.Congestion{Type: "bbr"}},
+		},
+		Bindings: []tunnel.Binding{
+			{ID: 1, ConnectionID: 5, StreamID: &streamOne, LocalAddr: "127.0.0.1:40002", PeerAddr: "203.0.113.9:5555", State: "established"},
+			// Opening bindings have no stream identity and must not be guessed.
+			{ID: 2, LocalAddr: "127.0.0.1:40003", PeerAddr: "203.0.113.10:5556", State: "opening"},
+			// Hostnames, missing peers, zero ports and zones are not exact endpoints.
+			{ID: 3, ConnectionID: 5, StreamID: &streamZero, LocalAddr: "localhost:40004", PeerAddr: "203.0.113.11:5557", State: "established"},
+			{ID: 4, ConnectionID: 5, StreamID: &streamZero, LocalAddr: "127.0.0.1:0", PeerAddr: "203.0.113.12:5558", State: "established"},
+			{ID: 5, ConnectionID: 5, StreamID: &streamZero, LocalAddr: "127.0.0.1:40005", PeerAddr: "", State: "established"},
+			// Duplicate stream identity is dropped instead of emitting an
+			// ambiguous frame.
+			{ID: 6, ConnectionID: 5, StreamID: &streamOne, LocalAddr: "127.0.0.1:40006", PeerAddr: "203.0.113.13:5559", State: "established"},
+			// Stream 0 is valid and remains distinguishable from "no stream".
+			{ID: 7, ConnectionID: 5, StreamID: &streamZero, LocalAddr: "127.0.0.1:40001", PeerAddr: "203.0.113.8:5554", State: "established"},
+		},
+	}
+	event := buildTelemetry(1, 1, status)
+	if event.Truncated {
+		t.Fatal("unexpected truncation")
+	}
+	if len(event.Bindings) != 2 {
+		t.Fatalf("bindings = %d, want 2: %+v", len(event.Bindings), event.Bindings)
+	}
+	if event.Bindings[0].LocalAddr != "127.0.0.1:40001" || event.Bindings[0].StreamID != 0 {
+		t.Fatalf("unexpected first binding: %+v", event.Bindings[0])
+	}
+	if event.Bindings[1].LocalAddr != "127.0.0.1:40002" || event.Bindings[1].StreamID != 1 {
+		t.Fatalf("unexpected second binding: %+v", event.Bindings[1])
+	}
+	if event.Bindings[0].PeerAddr != "203.0.113.8:5554" || event.Bindings[0].ConnectionID != 5 {
+		t.Fatalf("binding identity was not preserved: %+v", event.Bindings[0])
+	}
+
+	// The cap keeps the lowest sorted identities and marks the frame truncated.
+	for i := 0; i < telemetryMaxBindings+2; i++ {
+		streamID := int64(1000 + i)
+		status.Bindings = append(status.Bindings, tunnel.Binding{
+			ConnectionID: 5,
+			StreamID:     &streamID,
+			LocalAddr:    "127.0.0.1:" + strconv.Itoa(41000+i),
+			PeerAddr:     "203.0.113.1:" + strconv.Itoa(41000+i),
+			State:        "established",
+		})
+	}
+	bounded := buildTelemetry(2, 2, status)
+	if !bounded.Truncated {
+		t.Fatal("expected truncated bindings")
+	}
+	if len(bounded.Bindings) != telemetryMaxBindings {
+		t.Fatalf("bindings = %d, want %d", len(bounded.Bindings), telemetryMaxBindings)
+	}
+	line, err := encodeTelemetry(bounded)
+	if err != nil {
+		t.Fatalf("encodeTelemetry: %v", err)
+	}
+	assertStatsSchema(t, line)
+}
+
 // statsEvent is the test-side mirror of the wire schema. Extra or missing keys
 // are caught separately by assertStatsSchema.
 type statsEvent struct {
@@ -138,6 +203,12 @@ type statsEvent struct {
 		BytesSent              uint64 `json:"bytesSent"`
 		BytesReceived          uint64 `json:"bytesReceived"`
 	} `json:"connections"`
+	Bindings []struct {
+		ConnectionID uint64 `json:"connectionId"`
+		StreamID     int64  `json:"streamId"`
+		LocalAddr    string `json:"localAddr"`
+		PeerAddr     string `json:"peerAddr"`
+	} `json:"bindings"`
 	Truncated bool `json:"truncated"`
 }
 
@@ -147,7 +218,7 @@ func assertStatsSchema(t *testing.T, line []byte) {
 	if err := json.Unmarshal(line, &top); err != nil {
 		t.Fatalf("invalid stats event %q: %v", line, err)
 	}
-	assertExactKeys(t, top, "version", "event", "sequence", "elapsedNanos", "connections", "truncated")
+	assertExactKeys(t, top, "version", "event", "sequence", "elapsedNanos", "connections", "bindings", "truncated")
 	if string(bytes.TrimSpace(top["connections"])) == "null" {
 		t.Fatalf("connections must be an array: %s", line)
 	}
@@ -157,6 +228,16 @@ func assertStatsSchema(t *testing.T, line []byte) {
 	}
 	for _, connection := range connections {
 		assertExactKeys(t, connection, "id", "congestion", "txTargetBytesPerSecond", "smoothedRttNanos", "bytesSent", "bytesReceived")
+	}
+	if string(bytes.TrimSpace(top["bindings"])) == "null" {
+		t.Fatalf("bindings must be an array: %s", line)
+	}
+	var bindings []map[string]json.RawMessage
+	if err := json.Unmarshal(top["bindings"], &bindings); err != nil {
+		t.Fatalf("bindings must be an array: %s: %v", line, err)
+	}
+	for _, binding := range bindings {
+		assertExactKeys(t, binding, "connectionId", "streamId", "localAddr", "peerAddr")
 	}
 }
 
@@ -309,6 +390,9 @@ func TestManagedServerEmitsStatsAfterObserve(t *testing.T) {
 	}
 	if len(stats.Connections) != 0 {
 		t.Fatalf("empty server reported connections: %+v", stats.Connections)
+	}
+	if len(stats.Bindings) != 0 {
+		t.Fatalf("empty server reported bindings: %+v", stats.Bindings)
 	}
 
 	if _, err := io.WriteString(pw, managedShutdownCommand+"\n"); err != nil {

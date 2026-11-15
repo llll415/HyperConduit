@@ -112,7 +112,7 @@ public final class TelemetryFixture {
                 + "{\"id\":2,\"congestion\":\"brutal\",\"txTargetBytesPerSecond\":1250000,"
                 + "\"smoothedRttNanos\":8000000,\"bytesSent\":" + (sent / 2)
                 + ",\"bytesReceived\":" + (received / 2) + "}"
-                + "],\"truncated\":false}");
+                + "],\"bindings\":[],\"truncated\":false}");
     }
 
     private static void emit(String json) {

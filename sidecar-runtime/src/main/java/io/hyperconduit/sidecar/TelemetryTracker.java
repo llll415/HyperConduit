@@ -5,6 +5,7 @@ import com.google.gson.stream.JsonToken;
 
 import java.io.IOException;
 import java.io.StringReader;
+import java.net.InetSocketAddress;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -25,12 +26,15 @@ import java.util.regex.Pattern;
 final class TelemetryTracker {
 
     static final int MAX_CONNECTIONS = 128;
+    static final int MAX_BINDINGS = 256;
     private static final int MAX_DEPTH = 8;
     private static final Set<String> ROOT_FIELDS = Set.of(
-            "version", "event", "sequence", "elapsedNanos", "connections", "truncated");
+            "version", "event", "sequence", "elapsedNanos", "connections", "bindings", "truncated");
     private static final Set<String> CONNECTION_FIELDS = Set.of(
             "id", "congestion", "txTargetBytesPerSecond", "smoothedRttNanos",
             "bytesSent", "bytesReceived");
+    private static final Set<String> BINDING_FIELDS = Set.of(
+            "connectionId", "streamId", "localAddr", "peerAddr");
     private static final Set<String> CONGESTIONS = Set.of("bbr", "reno", "brutal");
     private static final Pattern SEQUENCE = Pattern.compile("\"sequence\"\\s*:\\s*([1-9][0-9]*)");
     private static final Pattern ELAPSED = Pattern.compile("\"elapsedNanos\"\\s*:\\s*([1-9][0-9]*)");
@@ -48,7 +52,8 @@ final class TelemetryTracker {
     record Sample(long id, String congestion, long txTargetBytesPerSecond,
                   long smoothedRttNanos, long bytesSent, long bytesReceived) {}
 
-    record Frame(long sequence, long elapsedNanos, boolean truncated, List<Sample> connections) {}
+    record Frame(long sequence, long elapsedNanos, boolean truncated, List<Sample> connections,
+                 List<TelemetrySnapshot.Bridge> bindings) {}
 
     private record Counters(long bytesSent, long bytesReceived) {}
 
@@ -137,6 +142,8 @@ final class TelemetryTracker {
             if (!(root.get("truncated") instanceof Boolean truncated)) return null;
             if (!(root.get("connections") instanceof List<?> list)) return null;
             if (list.size() > MAX_CONNECTIONS) return null;
+            if (!(root.get("bindings") instanceof List<?> bindingList)) return null;
+            if (bindingList.size() > MAX_BINDINGS) return null;
 
             List<Sample> samples = new ArrayList<>(list.size());
             Set<Long> ids = new HashSet<>();
@@ -164,7 +171,30 @@ final class TelemetryTracker {
                         nonNegative(connection.get("bytesSent")),
                         nonNegative(connection.get("bytesReceived"))));
             }
-            return new Frame(sequence, elapsed, truncated, List.copyOf(samples));
+
+            List<TelemetrySnapshot.Bridge> bridges = new ArrayList<>(bindingList.size());
+            Set<String> localEndpoints = new HashSet<>();
+            Set<String> streamIdentities = new HashSet<>();
+            for (Object value : bindingList) {
+                if (!(value instanceof Map<?, ?>)) return null;
+                @SuppressWarnings("unchecked")
+                Map<String, Object> binding = (Map<String, Object>) value;
+                if (!binding.keySet().equals(BINDING_FIELDS)) return null;
+                long connectionId = positive(binding.get("connectionId"));
+                long streamId = nonNegative(binding.get("streamId"));
+                if (!(binding.get("localAddr") instanceof String localText)
+                        || !(binding.get("peerAddr") instanceof String peerText)) {
+                    return null;
+                }
+                InetSocketAddress local = EndpointText.parse(localText);
+                InetSocketAddress peer = EndpointText.parse(peerText);
+                if (local == null || peer == null) return null;
+                String localKey = EndpointText.key(local);
+                if (localKey == null || !localEndpoints.add(localKey)) return null;
+                if (!streamIdentities.add(connectionId + ":" + streamId)) return null;
+                bridges.add(new TelemetrySnapshot.Bridge(connectionId, streamId, local, peer));
+            }
+            return new Frame(sequence, elapsed, truncated, List.copyOf(samples), List.copyOf(bridges));
         } catch (RuntimeException invalid) {
             return null;
         }
@@ -229,7 +259,7 @@ final class TelemetryTracker {
         lastSequence = frame.sequence();
         lastElapsed = frame.elapsedNanos();
         current = new TelemetrySnapshot(frame.sequence(), frame.elapsedNanos(), frame.truncated(),
-                nowNanos, connections);
+                nowNanos, connections, frame.bindings());
         return true;
     }
 

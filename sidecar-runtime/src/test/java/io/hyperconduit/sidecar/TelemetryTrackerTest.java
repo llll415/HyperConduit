@@ -3,6 +3,8 @@ package io.hyperconduit.sidecar;
 import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
+import java.net.InetAddress;
+import java.net.InetSocketAddress;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -39,9 +41,9 @@ class TelemetryTrackerTest {
     @Test
     void rejectsUnknownDuplicateAndOutOfRangeFields() {
         assertInvalid("{\"version\":1,\"event\":\"stats\",\"sequence\":1,\"elapsedNanos\":1,"
-                + "\"connections\":[],\"truncated\":false,\"extra\":1}");
+                + "\"connections\":[],\"bindings\":[],\"truncated\":false,\"extra\":1}");
         assertInvalid("{\"version\":1,\"event\":\"stats\",\"sequence\":1,\"sequence\":2,"
-                + "\"elapsedNanos\":1,\"connections\":[],\"truncated\":false}");
+                + "\"elapsedNanos\":1,\"connections\":[],\"bindings\":[],\"truncated\":false}");
         assertInvalid(stats(1, 1, false, "{\"id\":1,\"congestion\":\"bbr\","
                 + "\"txTargetBytesPerSecond\":0,\"smoothedRttNanos\":0,\"bytesSent\":0,"
                 + "\"bytesReceived\":0,\"peer\":\"x\"}"));
@@ -59,17 +61,17 @@ class TelemetryTrackerTest {
         assertInvalid(stats(1, 1, false, conn(1, "reno", 1, 0, 0, 0)));
         assertInvalid(stats(1, 1, false, conn(1, "brutal", 0, 0, 0, 0)));
         assertInvalid("{\"version\":1,\"event\":\"stats\",\"sequence\":1e3,"
-                + "\"elapsedNanos\":1,\"connections\":[],\"truncated\":false}");
+                + "\"elapsedNanos\":1,\"connections\":[],\"bindings\":[],\"truncated\":false}");
         assertInvalid("{\"version\":1,\"event\":\"stats\",\"sequence\":01,"
-                + "\"elapsedNanos\":1,\"connections\":[],\"truncated\":false}");
+                + "\"elapsedNanos\":1,\"connections\":[],\"bindings\":[],\"truncated\":false}");
         assertInvalid("{\"version\":1,\"event\":\"stats\",\"sequence\":9223372036854775808,"
-                + "\"elapsedNanos\":1,\"connections\":[],\"truncated\":false}");
+                + "\"elapsedNanos\":1,\"connections\":[],\"bindings\":[],\"truncated\":false}");
         assertInvalid("{\"version\":1,\"event\":\"stats\",\"sequence\":1,"
-                + "\"elapsedNanos\":1,\"connections\":[],\"truncated\":\"false\"}");
+                + "\"elapsedNanos\":1,\"connections\":[],\"bindings\":[],\"truncated\":\"false\"}");
         assertInvalid("{\"version\":2,\"event\":\"stats\",\"sequence\":1,"
-                + "\"elapsedNanos\":1,\"connections\":[],\"truncated\":false}");
+                + "\"elapsedNanos\":1,\"connections\":[],\"bindings\":[],\"truncated\":false}");
         assertInvalid("{\"version\":1,\"event\":\"ready\",\"sequence\":1,"
-                + "\"elapsedNanos\":1,\"connections\":[],\"truncated\":false}");
+                + "\"elapsedNanos\":1,\"connections\":[],\"bindings\":[],\"truncated\":false}");
         assertInvalid(stats(1, 1, false) + "{}");
     }
 
@@ -80,6 +82,67 @@ class TelemetryTrackerTest {
         assertInvalid(stats(1, 1, false, many.toArray(String[]::new)));
         assertInvalid(stats(1, 1, false,
                 conn(7, "bbr", 0, 0, 0, 0), conn(7, "reno", 0, 0, 0, 0)));
+    }
+
+    @Test
+    void parsesStrictBindingsAndMatchesExactEndpoints() throws Exception {
+        TelemetryTracker.Frame frame = parse(statsWithBindings(1, 1, false,
+                conn(7, "bbr", 0, 0, 0, 0),
+                binding(7, 0, "127.0.0.1:40001", "203.0.113.5:5555"),
+                binding(7, 1, "[::1]:40002", "[2001:db8::1]:5556")));
+        assertNotNull(frame);
+        assertEquals(2, frame.bindings().size());
+        assertEquals(0, frame.bindings().get(0).streamId());
+        assertEquals(1, frame.bindings().get(1).streamId());
+
+        TelemetrySnapshot snapshot = new TelemetrySnapshot(1, 1, false, System.nanoTime(),
+                Map.of(), frame.bindings());
+        TelemetrySnapshot.Bridge exact = snapshot.bridgeFor(address("127.0.0.1", 40001));
+        assertNotNull(exact);
+        assertEquals(7, exact.connectionId());
+        assertEquals("203.0.113.5:5555", exact.peerAddress());
+        assertNotNull(snapshot.bridgeFor(address("::1", 40002)));
+        // Same host, different port is not a match.
+        assertNull(snapshot.bridgeFor(address("127.0.0.1", 40003)));
+        assertNull(snapshot.bridgeFor(null));
+        // An IPv4-mapped IPv6 socket is the same endpoint as IPv4.
+        assertNotNull(snapshot.bridgeFor(mappedAddress("127.0.0.1", 40001)));
+    }
+
+    @Test
+    void rejectsInvalidAndAmbiguousBindings() {
+        assertInvalid(statsWithBindings(1, 1, false, "",
+                binding(1, 0, "localhost:40001", "203.0.113.5:5555")));
+        assertInvalid(statsWithBindings(1, 1, false, "",
+                binding(1, 0, "127.0.0.1:0", "203.0.113.5:5555")));
+        assertInvalid(statsWithBindings(1, 1, false, "",
+                binding(1, 0, "127.0.0.1:40001", "203.0.113.5:0")));
+        assertInvalid(statsWithBindings(1, 1, false, "",
+                binding(1, 0, "0.0.0.0:40001", "203.0.113.5:5555")));
+        assertInvalid(statsWithBindings(1, 1, false, "",
+                binding(0, 0, "127.0.0.1:40001", "203.0.113.5:5555")));
+        assertInvalid(statsWithBindings(1, 1, false, "",
+                binding(1, -1, "127.0.0.1:40001", "203.0.113.5:5555")));
+        // Duplicate local endpoints make association ambiguous.
+        assertInvalid(statsWithBindings(1, 1, false, "",
+                binding(1, 0, "127.0.0.1:40001", "203.0.113.5:5555"),
+                binding(2, 0, "127.0.0.1:40001", "203.0.113.6:5556")));
+        // Duplicate connection/stream identities are also ambiguous.
+        assertInvalid(statsWithBindings(1, 1, false, "",
+                binding(1, 0, "127.0.0.1:40001", "203.0.113.5:5555"),
+                binding(1, 0, "127.0.0.1:40002", "203.0.113.6:5556")));
+        assertInvalid(statsWithBindings(1, 1, false, "",
+                "{\"connectionId\":1,\"streamId\":0,\"localAddr\":\"127.0.0.1:40001\","
+                        + "\"peerAddr\":\"203.0.113.5:5555\",\"extra\":1}"));
+        // The bindings field is mandatory in the strict schema.
+        assertInvalid("{\"version\":1,\"event\":\"stats\",\"sequence\":1,"
+                + "\"elapsedNanos\":1,\"connections\":[],\"truncated\":false}");
+
+        List<String> many = new ArrayList<>();
+        for (int i = 0; i < TelemetryTracker.MAX_BINDINGS + 1; i++) {
+            many.add(binding(1, i, "127.0.0.1:" + (42000 + i), "203.0.113.1:" + (42000 + i)));
+        }
+        assertInvalid(statsWithBindings(1, 1, false, "", many.toArray(String[]::new)));
     }
 
     @Test
@@ -218,9 +281,9 @@ class TelemetryTrackerTest {
     void staleSnapshotsReportUnavailable() {
         long now = System.nanoTime();
         Map<Long, TelemetrySnapshot.Connection> connections = Map.of();
-        TelemetrySnapshot live = new TelemetrySnapshot(1, 1, false, now, connections);
+        TelemetrySnapshot live = new TelemetrySnapshot(1, 1, false, now, connections, List.of());
         TelemetrySnapshot stale = new TelemetrySnapshot(1, 1, false,
-                now - TelemetrySnapshot.STALE_NANOS - 1, connections);
+                now - TelemetrySnapshot.STALE_NANOS - 1, connections, List.of());
         assertTrue(live.available());
         assertFalse(stale.available());
     }
@@ -241,7 +304,20 @@ class TelemetryTrackerTest {
                                 String... connections) {
         return "{\"version\":1,\"event\":\"stats\",\"sequence\":" + sequence
                 + ",\"elapsedNanos\":" + elapsed + ",\"connections\":["
-                + String.join(",", connections) + "],\"truncated\":" + truncated + "}";
+                + String.join(",", connections) + "],\"bindings\":[],\"truncated\":" + truncated + "}";
+    }
+
+    private static String statsWithBindings(long sequence, long elapsed, boolean truncated,
+                                            String connections, String... bindings) {
+        return "{\"version\":1,\"event\":\"stats\",\"sequence\":" + sequence
+                + ",\"elapsedNanos\":" + elapsed + ",\"connections\":[" + connections
+                + "],\"bindings\":[" + String.join(",", bindings) + "],\"truncated\":"
+                + truncated + "}";
+    }
+
+    private static String binding(long connectionId, long streamId, String local, String peer) {
+        return "{\"connectionId\":" + connectionId + ",\"streamId\":" + streamId
+                + ",\"localAddr\":\"" + local + "\",\"peerAddr\":\"" + peer + "\"}";
     }
 
     private static String conn(long id, String congestion, long tx, long rtt,
@@ -251,5 +327,18 @@ class TelemetryTrackerTest {
                 + ",\"smoothedRttNanos\":" + rtt
                 + ",\"bytesSent\":" + sent
                 + ",\"bytesReceived\":" + received + "}";
+    }
+
+    private static InetSocketAddress address(String host, int port) throws IOException {
+        return new InetSocketAddress(InetAddress.getByName(host), port);
+    }
+
+    private static InetSocketAddress mappedAddress(String host, int port) throws IOException {
+        byte[] ipv4 = InetAddress.getByName(host).getAddress();
+        byte[] mapped = new byte[16];
+        mapped[10] = (byte) 0xff;
+        mapped[11] = (byte) 0xff;
+        System.arraycopy(ipv4, 0, mapped, 12, 4);
+        return new InetSocketAddress(InetAddress.getByAddress(mapped), port);
     }
 }

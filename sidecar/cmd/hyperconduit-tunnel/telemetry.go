@@ -7,11 +7,10 @@ import (
 	"errors"
 	"io"
 	"math"
+	"net/netip"
 	"sort"
 	"strings"
 	"time"
-
-	"github.com/apernet/hysteria/core/v2/observe"
 
 	"github.com/llll415/HyperConduit/sidecar/internal/tunnel"
 )
@@ -19,6 +18,7 @@ import (
 const (
 	telemetryInterval       = time.Second
 	telemetryMaxConnections = 128
+	telemetryMaxBindings    = 256
 	telemetryMaxLineBytes   = 65536
 )
 
@@ -33,12 +33,24 @@ type telemetryConnection struct {
 	BytesReceived          uint64 `json:"bytesReceived"`
 }
 
+// telemetryBinding exposes only the exact local TCP endpoint used to reach the
+// configured target and the QUIC peer that owns the stream. The Java consumer
+// uses LocalAddr for an exact endpoint match against the proxy's accepted
+// socket; it is never used as a public-IP guess.
+type telemetryBinding struct {
+	ConnectionID uint64 `json:"connectionId"`
+	StreamID     int64  `json:"streamId"`
+	LocalAddr    string `json:"localAddr"`
+	PeerAddr     string `json:"peerAddr"`
+}
+
 type telemetryStats struct {
 	Version      int                   `json:"version"`
 	Event        string                `json:"event"`
 	Sequence     int64                 `json:"sequence"`
 	ElapsedNanos int64                 `json:"elapsedNanos"`
 	Connections  []telemetryConnection `json:"connections"`
+	Bindings     []telemetryBinding    `json:"bindings"`
 	Truncated    bool                  `json:"truncated"`
 }
 
@@ -82,7 +94,7 @@ func streamTelemetry(ctx context.Context, endpoint *tunnel.Endpoint, endpointDon
 			// only possible on a clock without monotonic support.
 			elapsed = 1
 		}
-		line, err := encodeTelemetry(buildTelemetry(sequence, elapsed, endpoint.Status().Connections))
+		line, err := encodeTelemetry(buildTelemetry(sequence, elapsed, endpoint.Status()))
 		if err != nil {
 			return err
 		}
@@ -97,9 +109,16 @@ func streamTelemetry(ctx context.Context, endpoint *tunnel.Endpoint, endpointDon
 // controller are reported; closed or unknown values are dropped instead of
 // being guessed. Connections are sorted by ID before the 128-entry cap so the
 // output is stable.
-func buildTelemetry(sequence, elapsedNanos int64, snapshots []observe.Snapshot) telemetryStats {
-	connections := make([]telemetryConnection, 0, len(snapshots))
-	for _, snapshot := range snapshots {
+//
+// Bindings are emitted only for established TCP bridge streams with a literal
+// local endpoint and a literal QUIC peer. A binding that cannot be represented
+// exactly is dropped rather than approximated. Duplicate local endpoints or
+// duplicate (connectionId, streamId) pairs are also dropped: the Java parser
+// treats those as an invalid frame, and a broken stats line must never replace
+// a usable one.
+func buildTelemetry(sequence, elapsedNanos int64, status tunnel.Status) telemetryStats {
+	connections := make([]telemetryConnection, 0, len(status.Connections))
+	for _, snapshot := range status.Connections {
 		if snapshot.State != "established" || snapshot.ID == 0 || snapshot.ID > math.MaxInt64 {
 			continue
 		}
@@ -121,9 +140,61 @@ func buildTelemetry(sequence, elapsedNanos int64, snapshots []observe.Snapshot) 
 		})
 	}
 	sort.Slice(connections, func(i, j int) bool { return connections[i].ID < connections[j].ID })
-	truncated := len(connections) > telemetryMaxConnections
-	if truncated {
+
+	bindings := make([]telemetryBinding, 0, len(status.Bindings))
+	seenLocal := make(map[string]struct{}, len(status.Bindings))
+	type streamKey struct {
+		connectionID uint64
+		streamID     int64
+	}
+	seenStream := make(map[streamKey]struct{}, len(status.Bindings))
+	for _, binding := range status.Bindings {
+		if binding.State != "established" || binding.StreamID == nil || *binding.StreamID < 0 {
+			continue
+		}
+		if binding.ConnectionID == 0 || binding.ConnectionID > math.MaxInt64 {
+			continue
+		}
+		local, ok := canonicalTelemetryEndpoint(binding.LocalAddr)
+		if !ok {
+			continue
+		}
+		peer, ok := canonicalTelemetryEndpoint(binding.PeerAddr)
+		if !ok {
+			continue
+		}
+		key := streamKey{connectionID: binding.ConnectionID, streamID: *binding.StreamID}
+		if _, duplicate := seenLocal[local]; duplicate {
+			continue
+		}
+		if _, duplicate := seenStream[key]; duplicate {
+			continue
+		}
+		seenLocal[local] = struct{}{}
+		seenStream[key] = struct{}{}
+		bindings = append(bindings, telemetryBinding{
+			ConnectionID: binding.ConnectionID,
+			StreamID:     *binding.StreamID,
+			LocalAddr:    local,
+			PeerAddr:     peer,
+		})
+	}
+	sort.Slice(bindings, func(i, j int) bool {
+		if bindings[i].ConnectionID != bindings[j].ConnectionID {
+			return bindings[i].ConnectionID < bindings[j].ConnectionID
+		}
+		if bindings[i].StreamID != bindings[j].StreamID {
+			return bindings[i].StreamID < bindings[j].StreamID
+		}
+		return bindings[i].LocalAddr < bindings[j].LocalAddr
+	})
+
+	truncated := len(connections) > telemetryMaxConnections || len(bindings) > telemetryMaxBindings
+	if len(connections) > telemetryMaxConnections {
 		connections = connections[:telemetryMaxConnections]
+	}
+	if len(bindings) > telemetryMaxBindings {
+		bindings = bindings[:telemetryMaxBindings]
 	}
 	return telemetryStats{
 		Version:      1,
@@ -131,8 +202,24 @@ func buildTelemetry(sequence, elapsedNanos int64, snapshots []observe.Snapshot) 
 		Sequence:     sequence,
 		ElapsedNanos: elapsedNanos,
 		Connections:  connections,
+		Bindings:     bindings,
 		Truncated:    truncated,
 	}
+}
+
+// canonicalTelemetryEndpoint accepts only a literal IP:port with a non-zero
+// port. netip.ParseAddrPort never resolves DNS; zones and unspecified
+// addresses are rejected because they cannot be matched against a proxy socket.
+func canonicalTelemetryEndpoint(text string) (string, bool) {
+	addrPort, err := netip.ParseAddrPort(text)
+	if err != nil {
+		return "", false
+	}
+	addr := addrPort.Addr()
+	if !addr.IsValid() || addr.IsUnspecified() || addr.Zone() != "" || addrPort.Port() == 0 {
+		return "", false
+	}
+	return netip.AddrPortFrom(addr.Unmap(), addrPort.Port()).String(), true
 }
 
 // encodeTelemetry enforces the 64 KiB line bound locally. The parent never has
@@ -147,6 +234,13 @@ func encodeTelemetry(event telemetryStats) ([]byte, error) {
 		}
 		if buffer.Len() <= telemetryMaxLineBytes {
 			return buffer.Bytes(), nil
+		}
+		// Bindings are auxiliary association data; drop them before the
+		// transport counters that drive the visible rates.
+		if len(event.Bindings) > 0 {
+			event.Bindings = event.Bindings[:len(event.Bindings)-1]
+			event.Truncated = true
+			continue
 		}
 		if len(event.Connections) == 0 {
 			return nil, errors.New("telemetry line exceeds limit")

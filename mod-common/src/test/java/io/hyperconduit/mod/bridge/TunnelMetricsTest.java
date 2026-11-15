@@ -6,6 +6,7 @@ import io.netty.channel.embedded.EmbeddedChannel;
 import org.junit.jupiter.api.Test;
 
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Supplier;
@@ -125,7 +126,7 @@ class TunnelMetricsTest {
         long staleCapturedAt = System.nanoTime() - TelemetrySnapshot.STALE_NANOS - 1;
         EmbeddedChannel channel = channel(true, null,
                 () -> new TelemetrySnapshot(1L, 1L, false, staleCapturedAt,
-                        Map.of(9L, connection(9L, "bbr"))));
+                        Map.of(9L, connection(9L, "bbr")), List.of()));
         try {
             assertNull(TunnelMetrics.connection(channel),
                     "connections from a stale snapshot must not be exposed");
@@ -138,7 +139,7 @@ class TunnelMetricsTest {
     void truncatedSnapshotMissingTheConnectionHasNoMetrics() {
         EmbeddedChannel channel = channel(false, 5L,
                 () -> new TelemetrySnapshot(1L, 1L, true, System.nanoTime(),
-                        Map.of(9L, connection(9L, "bbr"))));
+                        Map.of(9L, connection(9L, "bbr")), List.of()));
         try {
             assertNull(TunnelMetrics.connection(channel),
                     "a truncated snapshot must not substitute another connection");
@@ -157,7 +158,7 @@ class TunnelMetricsTest {
 
             current.set(new TelemetrySnapshot(2L, 2L, false,
                     System.nanoTime() - TelemetrySnapshot.STALE_NANOS - 1,
-                    Map.of(9L, connection(9L, "bbr"))));
+                    Map.of(9L, connection(9L, "bbr")), List.of()));
             assertNull(TunnelMetrics.connection(channel),
                     "an unavailable refresh must not reuse the previous snapshot");
         } finally {
@@ -186,7 +187,7 @@ class TunnelMetricsTest {
         for (TelemetrySnapshot.Connection connection : connections) {
             byId.put(connection.id(), connection);
         }
-        return new TelemetrySnapshot(1L, 1L, false, System.nanoTime(), byId);
+        return new TelemetrySnapshot(1L, 1L, false, System.nanoTime(), byId, List.of());
     }
 
     private static TelemetrySnapshot.Connection connection(long id, String congestion) {
