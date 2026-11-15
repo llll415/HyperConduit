@@ -88,6 +88,14 @@ public enum TunnelConfigKey {
         return Arrays.stream(values()).map(TunnelConfigKey::key).toList();
     }
 
+    /** Keys that may be suggested or listed without exposing a secret. */
+    public static List<String> visibleKeys() {
+        return Arrays.stream(values())
+                .filter(key -> !key.secret())
+                .map(TunnelConfigKey::key)
+                .toList();
+    }
+
     public static String keyList() {
         return String.join(", ", keys());
     }

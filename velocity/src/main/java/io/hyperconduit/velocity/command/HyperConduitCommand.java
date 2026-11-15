@@ -6,11 +6,12 @@ import com.velocitypowered.api.proxy.ConsoleCommandSource;
 import io.hyperconduit.sidecar.ProcessStatus;
 import io.hyperconduit.velocity.config.VelocityConfig;
 import io.hyperconduit.velocity.config.VelocityConfigStore;
+import io.hyperconduit.velocity.status.StatusService;
 import io.hyperconduit.velocity.tunnel.EndpointResolver;
 import io.hyperconduit.velocity.tunnel.TunnelProcess;
 import io.hyperconduit.velocity.tunnel.VelocityTunnelController;
+import io.hyperconduit.velocity.watch.WatchService;
 
-import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Locale;
@@ -31,10 +32,15 @@ public final class HyperConduitCommand implements SimpleCommand {
 
     private final VelocityConfigStore store;
     private final VelocityTunnelController controller;
+    private final StatusService statusService;
+    private final WatchService watchService;
 
-    public HyperConduitCommand(VelocityConfigStore store, VelocityTunnelController controller) {
+    public HyperConduitCommand(VelocityConfigStore store, VelocityTunnelController controller,
+                               StatusService statusService, WatchService watchService) {
         this.store = Objects.requireNonNull(store, "store");
         this.controller = Objects.requireNonNull(controller, "controller");
+        this.statusService = Objects.requireNonNull(statusService, "statusService");
+        this.watchService = Objects.requireNonNull(watchService, "watchService");
     }
 
     @Override
@@ -45,20 +51,19 @@ public final class HyperConduitCommand implements SimpleCommand {
             return;
         }
         String[] args = invocation.arguments();
-        if (args.length == 0 || !"tunnel".equalsIgnoreCase(args[0])) {
-            usage(source);
-            return;
-        }
-        if (args.length == 1) {
-            tunnelUsage(source);
-            return;
-        }
-        switch (args[1].toLowerCase(Locale.ROOT)) {
-            case "status" -> status(source);
-            case "restart" -> restart(source);
-            case "config" -> config(source, args);
-            case "proxyprotocol" -> proxy(source, args);
-            default -> tunnelUsage(source);
+        switch (CommandRouting.route(args)) {
+            case STATUS -> sendStatus(source);
+            case WATCH -> {
+                watchService.add(source);
+                source.sendPlainMessage(PREFIX + "已开始每秒输出实时状态；使用 /hyperconduit watch stop 停止。");
+            }
+            case WATCH_STOP -> {
+                watchService.remove(source);
+                source.sendPlainMessage(PREFIX + "已停止实时状态输出。");
+            }
+            case TUNNEL_USAGE -> tunnelUsage(source);
+            case TUNNEL -> tunnel(source, args);
+            case USAGE -> usage(source);
         }
     }
 
@@ -69,49 +74,27 @@ public final class HyperConduitCommand implements SimpleCommand {
 
     @Override
     public List<String> suggest(Invocation invocation) {
-        String[] args = invocation.arguments();
-        if (args.length == 0) {
-            return List.of("tunnel");
-        }
-        if (!"tunnel".equalsIgnoreCase(args[0])) {
-            return List.of();
-        }
-        if (args.length == 1) {
-            return List.of("status", "restart", "config", "proxyprotocol");
-        }
-        String sub = args[1].toLowerCase(Locale.ROOT);
-        if (args.length == 2) {
-            if (sub.equals("config")) {
-                return visibleKeys();
+        return CommandRouting.suggest(invocation.arguments());
+    }
+
+    private void sendStatus(CommandSource source) {
+        try {
+            for (String line : statusService.lines()) {
+                source.sendPlainMessage(line);
             }
-            if (sub.equals("proxyprotocol")) {
-                return List.of("on", "off", "input", "output");
-            }
-            return List.of();
+        } catch (RuntimeException unavailable) {
+            source.sendPlainMessage(PREFIX + "状态暂不可用，请稍后再试。");
         }
-        if (args.length == 3) {
-            if (sub.equals("config")) {
-                return visibleKeys();
-            }
-            if (sub.equals("proxyprotocol")) {
-                String direction = args[2].toLowerCase(Locale.ROOT);
-                if (direction.equals("input") || direction.equals("output")) {
-                    return List.of("on", "off");
-                }
-            }
-            return List.of();
+    }
+
+    private void tunnel(CommandSource source, String[] args) {
+        switch (args[1].toLowerCase(Locale.ROOT)) {
+            case "status" -> status(source);
+            case "restart" -> restart(source);
+            case "config" -> config(source, args);
+            case "proxyprotocol" -> proxy(source, args);
+            default -> tunnelUsage(source);
         }
-        if (args.length == 4) {
-            if (sub.equals("config")) {
-                return TunnelConfigKey.fromKey(args[2])
-                        .map(TunnelConfigKey::valueSuggestions)
-                        .orElse(List.of());
-            }
-            if (sub.equals("proxyprotocol")) {
-                return List.of("on", "off");
-            }
-        }
-        return List.of();
     }
 
     private void status(CommandSource source) {
@@ -149,10 +132,10 @@ public final class HyperConduitCommand implements SimpleCommand {
             source.sendPlainMessage("Proxy Protocol v2 输出（Velocity）："
                     + (running.proxyProtocolV2Output ? "开启" : "关闭"));
             if (running.disableVanillaTcp) {
-                source.sendPlainMessage("disableVanillaTcp：已配置但无效（Velocity 下 tcpAllowed 始终为 true）");
+                source.sendPlainMessage("disableVanillaTcp：已配置但无效（Velocity 下 TCP 监听始终开放）");
             }
         }
-        source.sendPlainMessage("tcpAllowed：true（Velocity 始终保留 TCP 监听）");
+        source.sendPlainMessage("TCP 监听：始终开放；tcpAllowed 只描述该事实，不是访问控制策略");
     }
 
     private void restart(CommandSource source) {
@@ -222,7 +205,7 @@ public final class HyperConduitCommand implements SimpleCommand {
         }
         source.sendPlainMessage("enabled = " + config.enabled + "（仅配置文件）");
         source.sendPlainMessage("disableVanillaTcp = " + config.disableVanillaTcp
-                + "（Velocity 下无效，tcpAllowed 始终为 true）");
+                + "（Velocity 下无效，TCP 监听始终开放）");
     }
 
     private void proxy(CommandSource source, String[] args) {
@@ -276,7 +259,11 @@ public final class HyperConduitCommand implements SimpleCommand {
     }
 
     private void usage(CommandSource source) {
-        source.sendPlainMessage(PREFIX + "用法：/hyperconduit tunnel <status|restart|config|proxyprotocol>");
+        source.sendPlainMessage(PREFIX + "用法：");
+        source.sendPlainMessage("/hyperconduit status");
+        source.sendPlainMessage("/hyperconduit watch");
+        source.sendPlainMessage("/hyperconduit watch stop");
+        source.sendPlainMessage("/hyperconduit tunnel <status|restart|config|proxyprotocol>");
     }
 
     private void tunnelUsage(CommandSource source) {
@@ -299,16 +286,6 @@ public final class HyperConduitCommand implements SimpleCommand {
         return TunnelConfigKey.fromKey(rawKey)
                 .orElseThrow(() -> new TunnelCommandException(
                         "未知配置项。可用配置项：" + TunnelConfigKey.keyList() + "。"));
-    }
-
-    private static List<String> visibleKeys() {
-        List<String> keys = new ArrayList<>();
-        for (TunnelConfigKey key : TunnelConfigKey.values()) {
-            if (!key.secret()) {
-                keys.add(key.key());
-            }
-        }
-        return keys;
     }
 
     private static VelocityTunnelController.Result completed(

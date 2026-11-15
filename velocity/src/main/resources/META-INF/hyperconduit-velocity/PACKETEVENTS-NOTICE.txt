@@ -1,0 +1,13 @@
+HyperConduit Velocity plugin - PacketEvents prerequisite notice
+
+This plugin uses the public API of PacketEvents 2.14.0
+(https://github.com/retrooper/packetevents), which is licensed under
+GNU General Public License version 3 (GPL-3.0).
+
+PacketEvents is an independent prerequisite plugin. It is not bundled,
+compiled, copied, or otherwise redistributed inside this jar. Only the
+public API is referenced at compile time, and the plugin declares a
+metadata dependency on the separate "packetevents" plugin.
+
+HyperConduit itself remains licensed under the MIT License; see
+META-INF/LICENSE in this jar.

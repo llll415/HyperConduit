@@ -464,7 +464,7 @@ public final class VelocityTunnelController implements AutoCloseable {
         if (config.disableVanillaTcp) {
             LOGGER.log(System.Logger.Level.WARNING,
                     PREFIX + "配置项 disableVanillaTcp 在 Velocity 下无效："
-                            + "插件不会关闭 Velocity 的 TCP 监听，tcpAllowed 始终为 true。");
+                            + "插件不会关闭 Velocity 的 TCP 监听。");
         }
     }
 

@@ -8,25 +8,31 @@ plugins {
 
 repositories {
     maven("https://repo.papermc.io/repository/maven-public/")
+    maven("https://repo.codemc.io/repository/maven-releases/")
 }
 
 dependencies {
-    // Velocity provides Gson, SLF4J, Adventure, Brigadier and Netty at runtime. None of these
-    // dependencies are packaged into the plugin jar.
+    // Velocity provides Gson, SLF4J, Adventure, Brigadier and Netty at runtime. PacketEvents is a
+    // separate GPL-3.0 plugin and is declared as a metadata dependency; only its public API is
+    // compiled against and none of its classes are packaged into this MIT-licensed jar.
     compileOnly("com.velocitypowered:velocity-api:3.4.0-SNAPSHOT")
     annotationProcessor("com.velocitypowered:velocity-api:3.4.0-SNAPSHOT")
     compileOnly("com.google.code.gson:gson:2.10.1")
     compileOnly("org.slf4j:slf4j-api:2.0.16")
+    compileOnly("com.github.retrooper:packetevents-api:2.14.0")
+    compileOnly("io.netty:netty-transport:4.1.97.Final")
 
     // The runtime classes are bundled by unpacking the runtime jar below, so the plugin is a
     // single self-contained artifact apart from the Velocity-provided libraries.
     implementation(project(":sidecar-runtime"))
 
-    // Test-only: main sources reference the Velocity API and Gson, so both must be visible while
-    // compiling and running tests. They are still not packaged into the plugin jar.
+    // Test-only: main sources reference the Velocity API, Gson, PacketEvents and Netty, so they
+    // must be visible while compiling and running tests. They are still not packaged.
     testImplementation("com.velocitypowered:velocity-api:3.4.0-SNAPSHOT")
     testImplementation("com.google.code.gson:gson:2.10.1")
     testImplementation("org.slf4j:slf4j-api:2.0.16")
+    testImplementation("com.github.retrooper:packetevents-api:2.14.0")
+    testImplementation("io.netty:netty-transport:4.1.97.Final")
 }
 
 val runtimeJar = project(":sidecar-runtime").tasks.named<Jar>("jar")
@@ -65,6 +71,12 @@ val verifyVelocityJar by tasks.registering {
             check(metadata["id"] == "hyperconduit") { "Unexpected Velocity plugin id: ${metadata["id"]}" }
             check(metadata["version"] == project.version.toString()) {
                 "Velocity plugin version ${metadata["version"]} does not match ${project.version}"
+            }
+            val dependencies = metadata["dependencies"] as? List<*> ?: emptyList<Any>()
+            check(dependencies.any { dependency ->
+                dependency is Map<*, *> && dependency["id"] == "packetevents"
+            }) {
+                "velocity-plugin.json must declare the packetevents prerequisite: $dependencies"
             }
 
             val platforms = listOf("windows-amd64", "linux-amd64", "linux-arm64", "darwin-amd64", "darwin-arm64")
@@ -107,12 +119,18 @@ val verifyVelocityJar by tasks.registering {
                 }
             }
             check(zip.getEntry("META-INF/LICENSE") != null) { "Missing project LICENSE" }
+            check(zip.getEntry("META-INF/hyperconduit-velocity/PACKETEVENTS-NOTICE.txt") != null) {
+                "Missing PacketEvents prerequisite notice"
+            }
 
-            // Velocity supplies these APIs. Packaging them would shadow the proxy's own copies.
+            // Velocity and PacketEvents supply these APIs. Packaging them would shadow the
+            // proxy's own copies or redistribute GPL-3.0 PacketEvents code inside this MIT jar.
             val forbidden = zip.entries().asSequence().map { it.name }.filter { name ->
                 name.startsWith("com/velocitypowered/")
                         || name.startsWith("com/google/gson/")
                         || name.startsWith("org/slf4j/")
+                        || name.startsWith("com/github/retrooper/")
+                        || name.startsWith("io/github/retrooper/")
             }.toList()
             check(forbidden.isEmpty()) { "Plugin jar must not bundle Velocity-provided libraries: $forbidden" }
         }

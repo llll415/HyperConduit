@@ -1,11 +1,15 @@
 package io.hyperconduit.velocity;
 
+import com.github.retrooper.packetevents.PacketEvents;
+import com.github.retrooper.packetevents.PacketEventsAPI;
+import com.github.retrooper.packetevents.event.PacketListenerCommon;
 import com.velocitypowered.api.command.CommandManager;
 import com.velocitypowered.api.event.Subscribe;
 import com.velocitypowered.api.event.proxy.ListenerBoundEvent;
 import com.velocitypowered.api.event.proxy.ProxyInitializeEvent;
 import com.velocitypowered.api.event.proxy.ProxyShutdownEvent;
 import com.velocitypowered.api.network.ListenerType;
+import com.velocitypowered.api.plugin.Dependency;
 import com.velocitypowered.api.plugin.Plugin;
 import com.velocitypowered.api.plugin.annotation.DataDirectory;
 import com.velocitypowered.api.proxy.ProxyServer;
@@ -13,8 +17,11 @@ import io.hyperconduit.velocity.command.HyperConduitCommand;
 import io.hyperconduit.velocity.command.TunnelConfigValues;
 import io.hyperconduit.velocity.config.VelocityConfig;
 import io.hyperconduit.velocity.config.VelocityConfigStore;
+import io.hyperconduit.velocity.status.PacketEventsStatusListener;
+import io.hyperconduit.velocity.status.StatusService;
 import io.hyperconduit.velocity.tunnel.EndpointResolver;
 import io.hyperconduit.velocity.tunnel.VelocityTunnelController;
+import io.hyperconduit.velocity.watch.WatchService;
 import org.slf4j.Logger;
 
 import com.google.inject.Inject;
@@ -37,7 +44,8 @@ import java.util.Objects;
         name = "HyperConduit",
         version = "1.1.0",
         description = "QUIC/Hysteria 2 transport for Minecraft behind a Velocity proxy",
-        authors = {"HyperConduit"})
+        authors = {"HyperConduit"},
+        dependencies = @Dependency(id = "packetevents"))
 public final class HyperConduitVelocityPlugin {
 
     private static final String PREFIX = "[HyperConduit] ";
@@ -48,6 +56,9 @@ public final class HyperConduitVelocityPlugin {
 
     private VelocityConfigStore store;
     private VelocityTunnelController controller;
+    private StatusService statusService;
+    private WatchService watchService;
+    private PacketListenerCommon statusListener;
 
     @Inject
     public HyperConduitVelocityPlugin(ProxyServer server, Logger logger,
@@ -68,7 +79,11 @@ public final class HyperConduitVelocityPlugin {
         }
         store = new VelocityConfigStore(dataDirectory);
         controller = VelocityTunnelController.create(dataDirectory, store);
+        statusService = new StatusService(server, controller);
+        watchService = new WatchService(server, this, statusService::lines);
         registerCommand();
+        registerStatusAugmentation();
+        watchService.start();
         logConfigurationState();
     }
 
@@ -111,6 +126,11 @@ public final class HyperConduitVelocityPlugin {
 
     @Subscribe
     public void onProxyShutdown(ProxyShutdownEvent event) {
+        WatchService currentWatch = watchService;
+        if (currentWatch != null) {
+            currentWatch.close();
+        }
+        unregisterStatusAugmentation();
         VelocityTunnelController current = controller;
         if (current != null) {
             current.close();
@@ -122,7 +142,42 @@ public final class HyperConduitVelocityPlugin {
         CommandManager manager = server.getCommandManager();
         manager.register(
                 manager.metaBuilder("hyperconduit").plugin(this).build(),
-                new HyperConduitCommand(store, controller));
+                new HyperConduitCommand(store, controller, statusService, watchService));
+    }
+
+    /**
+     * PacketEvents is a declared prerequisite and remains a separate GPL-3.0
+     * plugin. Only its public listener API is used; a missing or incompatible
+     * version leaves status rendering functional without the extra JSON field.
+     */
+    private void registerStatusAugmentation() {
+        try {
+            PacketEventsAPI<?> api = PacketEvents.getAPI();
+            if (api == null || !api.isInitialized()) {
+                logger.warn(PREFIX + "PacketEvents 尚未初始化，状态 JSON 不会附加 hyperconduit 字段。");
+                return;
+            }
+            statusListener = api.getEventManager().registerListener(
+                    new PacketEventsStatusListener(controller::runningConfig));
+        } catch (RuntimeException | LinkageError unavailable) {
+            logger.warn(PREFIX + "PacketEvents 状态扩展不可用；原版状态响应保持原样。");
+        }
+    }
+
+    private void unregisterStatusAugmentation() {
+        PacketListenerCommon current = statusListener;
+        statusListener = null;
+        if (current == null) {
+            return;
+        }
+        try {
+            PacketEventsAPI<?> api = PacketEvents.getAPI();
+            if (api != null) {
+                api.getEventManager().unregisterListener(current);
+            }
+        } catch (RuntimeException | LinkageError unavailable) {
+            // Proxy shutdown must continue even if PacketEvents already stopped.
+        }
     }
 
     private void logConfigurationState() {
@@ -133,7 +188,7 @@ public final class HyperConduitVelocityPlugin {
             }
             if (config.disableVanillaTcp) {
                 logger.warn(PREFIX + "配置项 disableVanillaTcp 在 Velocity 下无效："
-                        + "插件不会关闭 Velocity 的 TCP 监听，tcpAllowed 始终为 true。");
+                        + "插件不会关闭 Velocity 的 TCP 监听。");
             }
             if (config.proxyProtocolV2Output) {
                 logger.info(PREFIX + "已配置 Proxy Protocol v2 输出；"
