@@ -93,7 +93,15 @@ public final class WatchService implements AutoCloseable {
                 registry.clear();
                 return;
             }
-            registry.removeIf(target -> !target.valid());
+            registry.removeIf(target -> {
+                try {
+                    return !target.valid();
+                } catch (RuntimeException unavailable) {
+                    // A broken permission/player lookup must not leave a
+                    // subscription that can never be validated again.
+                    return true;
+                }
+            });
             if (registry.isEmpty()) {
                 return;
             }
