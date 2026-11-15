@@ -32,9 +32,9 @@
 - 它不是通用代理，也不会绕过原版的登录与验证。
 - 它**不保证**改善网络。UDP 被限速或封锁的线路上，它可能更差，甚至连不上；隧道失败时**不会**自动改走 TCP。
 
-客户端目前只支持 NeoForge，Fabric 尚未实现。`feature/velocity` 分支另提供开发中的 Velocity 服务端插件，见下文；它不替代客户端 Mod。
+客户端目前只支持 NeoForge，Fabric 尚未实现。`feature/velocity` 分支另提供 Velocity 服务端插件，见下文；它不替代客户端 Mod。
 
-### Velocity 插件（开发中）
+### Velocity 插件（feature/velocity）
 
 Velocity 适配复用现有隧道程序，链路为：
 
@@ -43,21 +43,31 @@ NeoForge HC 客户端 → QUIC → HC 隧道程序 → TCP + Proxy Protocol v2 �
 ```
 
 - 插件通过 Velocity 公开 API 获取游戏监听地址和端口，UDP 使用相同的绑定地址和端口号；TCP 转发目标直接指向 Velocity，通配监听地址转换为对应的本机回环地址。不修改 Velocity 原生 TCP 网络、登录、认证或切服逻辑。
+- **前置插件：PacketEvents 2.14.0**（官方 Velocity 构建，GPL-3.0）。把 `packetevents-velocity-2.14.0.jar` 和 HyperConduit 插件一起放进 `plugins/`。HyperConduit 在插件元数据中声明依赖 `packetevents`，只在编译期调用其公开 API，不复制、不打包其代码。
+  - 下载：`https://github.com/retrooper/packetevents/releases/download/v2.14.0/packetevents-velocity-2.14.0.jar`
+  - 官方发布资产 SHA-256：`0772f64b51aaf79132c76bb1503707ea0d35433713d5312e67401eaa599d271b`
+  - 编译使用 Maven 构件 `com.github.retrooper:packetevents-api:2.14.0`，CodeMC 校验 SHA-256：`cf1afcfd1ccffba5108b3227918f1d8d4d0f10fc6b654901cff42d0070e427ca`
+  - 旧版 `VPacketEvents-1.2.0.jar` 是旧的桥接/打包插件，不是独立的 PacketEvents 2.14.0，不满足本插件的 API 要求，部署前应替换。
 - 管理员需要在 `velocity.toml` 中启用 `[advanced]` 下的 `haproxy-protocol = true`，并自行配置后端 modern forwarding。插件不会自动修改 Velocity 配置。
 - HC 使用游戏端口的 UDP；如果 Velocity 的 GS4 Query 也使用同一 UDP 端口，需要关闭 Query 或将其改到其他端口，避免端口占用冲突。
 - **Proxy Protocol v2 不是认证协议。** 必须通过监听地址、防火墙或安全组保护 Velocity TCP 入口，只允许可信转发端访问，否则可能被伪造玩家来源 IP。启用该功能的监听不能被当作普通 Minecraft TCP 入口直接使用。
-- `disableVanillaTcp` 在 Velocity 上**不适用、没有作用**；插件不会关闭 Velocity TCP 监听，也不宣称强制实现“仅隧道”。
+- `disableVanillaTcp` 在 Velocity 上**不适用、没有作用**；插件不会关闭 Velocity TCP 监听。`tcpAllowed` 始终为 `true`，它只描述“Velocity 的 TCP 监听仍然开放”这一结构事实，不是访问控制策略，也不能据此宣称“仅隧道”部署已经安全生效。
 - 前置 FRP 的 UDP Proxy Protocol v2 输入直接复用 v1.1.0 实现，默认关闭；它与向 Velocity 发送的 TCP Proxy Protocol v2 输出是两个独立方向。
 - Velocity 没有配置 GUI，使用配置文件、控制台和管理员命令管理。持久身份和受保护的临时启动配置由现有运行时管理。
-- Velocity 公开的服务器列表 API 不提供任意根 JSON 字段扩展，因此暂不附加 NeoForge 主线的 TCP 状态 JSON 能力声明；继续使用已有 UDP 能力探测，不注入 Velocity 私有网络实现。客户端隧道指标仍来自客户端自己的隧道进程。
+- 状态响应通过 PacketEvents 的公开 API 在完整状态 JSON 上附加 `hyperconduit` 字段，复用与 NeoForge 相同的五字段协议 `2`。其他 JSON 字段保持不变；附加失败时原状态响应照常返回。字段值来自隧道程序的运行配置快照，不读取磁盘上尚未应用的修改。
+- 玩家与隧道的关联优先使用 PacketEvents 暴露的底层 Netty channel 的真实 TCP 对端地址，与隧道程序遥测中的本地 TCP 端点做完整 `IP:端口` 精确匹配；不会只按玩家公网 IP 猜测。启用 Proxy Protocol v2 输出时，Velocity 的逻辑远端地址可能已被改写为玩家地址，因此不会用它回退关联。无法唯一匹配时显示“未知”，不会把未识别连接当作原版 TCP；遥测不可用时显示“指标暂不可用/未知”，不会用 `0` 代替。
+- `watch` 每秒输出一次，按玩家 UUID 或控制台去重；玩家退出、失去 `hyperconduit.admin` 权限或代理关闭时自动清理。
 
-此适配尚未完成实际 Velocity 进服、认证、切服及 FRP 链路验收，不能将主线的 NeoForge 测试结果视作 Velocity 已验证。
+此适配尚未完成实际 Velocity 进服、认证、切服及 FRP 链路验收；PacketEvents 状态扩展、玩家-隧道关联和 watch 清理只做了单元测试，不能将主线的 NeoForge 测试结果视作 Velocity 已验证。
 
-构建使用 `./gradlew :velocity:check`，插件产物为 `velocity/build/libs/hyperconduit-velocity-1.1.0.jar`，放入 Velocity 的 `plugins/`。需要 Java 21，编译目标为 Velocity API 3.4.0；其他版本尚未验证。插件默认不启用：创建或编辑 `plugins/hyperconduit/config.json`，填入 `{"enabled":true}`，同时按上述要求开启 Velocity 的协议头接收，再重启代理。向 Velocity 的协议头输出默认开启；FRP 输入仍默认关闭。配置文件不存在时读取默认值，命令首次保存时会生成文件。
+构建使用 `./gradlew :velocity:check`，插件产物为 `velocity/build/libs/hyperconduit-velocity-1.1.0.jar`，放入 Velocity 的 `plugins/`。需要 Java 21、Velocity API 3.4.0 和 PacketEvents 2.14.0；其他版本尚未验证。插件默认不启用：创建或编辑 `plugins/hyperconduit/config.json`，填入 `{"enabled":true}`，同时按上述要求开启 Velocity 的协议头接收，再重启代理。向 Velocity 的协议头输出默认开启；FRP 输入仍默认关闭。配置文件不存在时读取默认值，命令首次保存时会生成文件。
 
 管理员权限节点为 `hyperconduit.admin`，控制台可直接使用：
 
 ```text
+hyperconduit status
+hyperconduit watch
+hyperconduit watch stop
 hyperconduit tunnel status
 hyperconduit tunnel restart
 hyperconduit tunnel config [配置项] [值]
@@ -65,13 +75,15 @@ hyperconduit tunnel proxyprotocol on|off
 hyperconduit tunnel proxyprotocol input|output on|off
 ```
 
+`status` 与 `watch` 使用与 NeoForge 主线相同的配置行、每玩家隧道行和总计行结构。Velocity 没有单人世界的内存连接，也无法证明未匹配玩家使用的是原版 TCP，因此总计行只显示“隧道”和“未识别”，不伪造“原版 TCP”计数。
+
 其中不带方向的 `proxyprotocol on|off` 与主线一致，控制 FRP 输入。可配置带宽、拥塞控制、口令、禁用 Brutal、超时、连接上限、可信来源及协议头输入/输出；`enabled` 与无效的 `disableVanillaTcp` 通过文件管理。配置修改直接读盘并原子保存，不自动重启；`restart` 会断开 HC 隧道连接，但不操作其他 TCP 连接。未运行时 `restart` 不会启动隧道程序，首次启用或启动失败后的恢复需要重启代理。口令查询不回显原文，但通过命令输入口令仍可能被 Velocity 或其他插件记录，建议直接编辑配置文件。
 
 ## 安装与使用
 
 ### 安装
 
-客户端和服务端都需要 **Minecraft 1.21.1 + NeoForge** 和 **Java 21**。把同一版本的 `hyperconduit-neoforge-1.0.0.jar` 放进各自的 `mods/` 目录。
+客户端和服务端都需要 **Minecraft 1.21.1 + NeoForge** 和 **Java 21**。把同一版本的 `hyperconduit-neoforge-1.1.0.jar` 放进各自的 `mods/` 目录。
 
 ### 启用
 
@@ -266,7 +278,7 @@ Brutal 的“目标速率”是协商后的基础值，丢包补偿可能让实�
 
 Proxy Protocol v2 本身不提供身份认证，应配合回环/私网绑定和防火墙限制转发来源。首包丢失、地址映射失效或隧道程序重启后，需要 FRP 重新建立转发会话并发送带头首包。异常数据仅写入限频日志，包含实际来源、可解析的未验证声明地址及拒绝原因，不发送到聊天。
 
-以上新增能力尚未运行构建、自动化测试或真实 FRP 联调，不能视为已通过下方历史测试记录。
+以上 FRP 输入能力已有构建和自动化测试覆盖，但真实 FRP 转发链路仍未联调，不能视为已通过下方历史测试记录。
 
 ## 已知限制
 
@@ -276,6 +288,10 @@ Proxy Protocol v2 本身不提供身份认证，应配合回环/私网绑定和�
 - 兼容性只验证过原生 NeoForge 专用服和基于 Paper 的 Youer。如果第三方插件绕过 Minecraft 的 `Connection`，直接读取底层 Netty 通道地址，看到的会是 `127.0.0.1`，不是玩家真实地址。
 - 双方需要使用互相兼容的版本。目前没有版本号校验，建议两端使用同一个 jar。
 - 对外声明反映实际运行的监听策略。如果服务端安装了多端口监听类 Mod 且不同监听器的口令或 Brutal 策略不一致，对外声明会变成"未知"。
+- Velocity 适配尚未在真实代理上完成进服、认证、切服和 FRP 联调；PacketEvents 状态扩展、玩家-隧道精确关联与 watch 清理只有单元测试和构建校验。
+- Velocity 需要单独安装 PacketEvents 2.14.0；旧版 `VPacketEvents-1.2.0.jar` 不兼容。完全缺少 `packetevents` 插件时，Velocity 会因插件元数据依赖拒绝加载 HyperConduit；已安装但 API 不兼容或未初始化时，插件仍可加载，状态命令可用，但玩家会显示为“未知”，状态 JSON 不附加 `hyperconduit` 字段。
+- Velocity 无法关闭原版 TCP 监听，`disableVanillaTcp` 无效；`tcpAllowed` 始终为 `true`，它不是访问控制或“仅隧道”安全策略的证明。
+- 玩家-隧道关联依赖隧道程序遥测中的 TCP 桥接端点字段。旧版隧道程序二进制不提供该字段，关联会显示“未知”；插件不会退回按公网 IP 猜测。
 
 ## 测试记录
 
@@ -287,6 +303,7 @@ Proxy Protocol v2 本身不提供身份认证，应配合回环/私网绑定和�
 - 口令成功与失败、首次信任、身份变化被拒绝，以及删除信任后重新连接；
 - 服务器列表的能力标记与原版延迟显示、两种单次传输选择、在线指标与连接分类；
 - NeoForge 专用服的共存连接与在线状态；Youer 专用服的共存、仅隧道连接，以及 `status`、重复 `watch`、`watch stop`。
+- Velocity 插件：命令路由、状态行与未知/指标不可用语义、PacketEvents 状态 JSON 保留其他字段、玩家-隧道精确端点匹配、watch 去重/退出/权限/关服清理的单元测试；构建与 jar 内容校验。未在真实 Velocity 上运行。
 
 这些是功能验证，不是效果对比。
 
@@ -378,10 +395,11 @@ paceRate = ───────────
 
 ## 6. 实时指标
 
-Java 在子进程就绪后开启 `observe`，Go 侧每秒从标准输出推送一行 `stats`（最多 128 条活动连接，单行不超过 64 KiB）。指标来自实际的 QUIC 统计和本端发送控制器，不是根据游戏流量推算的。
+Java 在子进程就绪后开启 `observe`，Go 侧每秒从标准输出推送一行 `stats`（最多 128 条活动连接、256 条桥接端点，单行不超过 64 KiB）。指标来自实际的 QUIC 统计和本端发送控制器，不是根据游戏流量推算的。
 
 - Java 用单调序号与时间戳计算两次采样的字节差，得到速率。首帧、超过 3.5 秒间隔后的恢复帧、计数回退时显示 `速率待采样`；超过 3.5 秒没有新帧则显示 `指标暂不可用`。
 - 服务端通过 `TunnelAttributes.CONNECTION_ID` 把玩家通道对应到所属监听器的 QUIC 连接；客户端进程只有一条 QUIC 连接。
+- `stats` 还包含已建立 TCP 桥接的 `connectionId`、`streamId`、本地 TCP 端点和 QUIC 对端。字段仍是严格 schema：未知、重复或越界的端点会让整帧指标失效，但不会中断隧道。Velocity 插件用本地端点与 PacketEvents 底层 channel 的真实 TCP 对端做精确匹配；无法唯一匹配时不显示为隧道，也不猜测原版 TCP。
 - 异常的统计数据只会让指标失效，不会中断游戏连接；子进程退出或受管控制协议出错则可能中断连接。
 
 ## 7. 平台与构建
@@ -412,7 +430,7 @@ jar 默认包含以下五个平台的无 CGO 程序（`io/hyperconduit/sidecar/b
 Windows 请使用 `gradlew.bat`。产物：
 
 ```text
-neoforge/build/libs/hyperconduit-neoforge-1.0.0.jar
+neoforge/build/libs/hyperconduit-neoforge-1.1.0.jar
 ```
 
 ## 参考项目与许可
@@ -424,6 +442,7 @@ HyperConduit 基于下列开源项目构建或衍生（致谢只说明代码来�
 - **[`apernet/quic-go`](https://github.com/apernet/quic-go)** 及上游 **[`quic-go/quic-go`](https://github.com/quic-go/quic-go)**（MIT License）
   - 提供 QUIC 传输、多路复用流、HTTP/3 与拥塞控制接口。
 - **[Go 标准库与 `golang.org/x/*`](https://go.dev/)**（BSD-3-Clause License），以及传递依赖 **[`quic-go/qpack`](https://github.com/quic-go/qpack)**、**[`refraction-networking/utls`](https://github.com/refraction-networking/utls)**（由 `apernet/quic-go` 的 TLS 握手引入）、**[`klauspost/compress`](https://github.com/klauspost/compress)**、**[`andybalholm/brotli`](https://github.com/andybalholm/brotli)**。
+- **[PacketEvents](https://github.com/retrooper/packetevents)**（GPL-3.0）：作为独立的 Velocity 前置插件运行。本项目只在编译期调用其公开 API，不复制、不打包其源码或二进制；其 jar 内附带许可说明 `META-INF/hyperconduit-velocity/PACKETEVENTS-NOTICE.txt`。
 - **[NeoForge](https://neoforged.net/)**、**[ModDevGradle](https://github.com/neoforged/ModDevGradle)**、**[SpongePowered Mixin](https://github.com/SpongePowered/Mixin)**、**[ParchmentMC](https://parchmentmc.org/)**、**[Netty](https://netty.io/)**、**[Google Gson](https://github.com/google/gson)**，以及测试工具 **[JUnit 5](https://junit.org/junit5/)**、**[OW2 ASM](https://asm.ow2.io/)**、**[`stretchr/testify`](https://github.com/stretchr/testify)**、**[`uber-go/goleak`](https://github.com/uber-go/goleak)**。
 
 本项目以 **MIT** 许可证发布，全文见仓库根目录的 `LICENSE`。内置的 Hysteria 2 core、`apernet/quic-go` 等上游源码与第三方依赖各自遵循其原有许可证，原文随包保存在 jar 内的 `META-INF/hyperconduit-sidecar/`。
